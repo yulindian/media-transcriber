@@ -1,0 +1,4 @@
+sherpa-onnx==2.0.1
+numpy>=2,<3
+requests>=2.32
+yt-dlp>=2026.10.26

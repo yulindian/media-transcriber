@@ -1,0 +1,38 @@
+# Local settings and authentication
+config.json
+.env
+.env.*
+!.env.example
+*cookies*
+credentials*
+*.pem
+*.key
+
+# Runtime, models, inputs and private outputs
+.venv/
+venv/
+runtime/
+models/
+jobs/
+output/
+outputs/
+transcripts/
+benchmarks/*.json
+*.wav
+*.mp3
+*.m4a
+*.mp4
+*.webm
+*.onnx
+*.npy
+*.srt
+*.jsonl
+
+# Generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.part
+*.tmp
+.DS_Store
+Thumbs.db

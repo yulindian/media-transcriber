@@ -1,0 +1,21 @@
+{
+  "runtime": "D:/media-transcriber/runtime",
+  "output": "D:/media-transcriber/output",
+  "threads": 4,
+  "asr_language": "auto",
+  "segmentation_shift": 0.5,
+  "resolvers": {},
+  "anonymous_api": {
+    "enabled": true,
+    "endpoint": "https://api.bugpk.com/api/short_videos",
+    "platforms": ["小红书", "抖音", "视频号", "B站", "YouTube"],
+    "timeout": 25,
+    "fallbacks": [
+      {
+        "endpoint": "https://ynvan.com/api/parse",
+        "schema": "ynvan",
+        "platforms": ["YouTube"]
+      }
+    ]
+  }
+}
