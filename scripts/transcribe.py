@@ -16,6 +16,7 @@ from pathlib import Path
 import sources
 import engine
 import documents as docs
+import quality
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -311,7 +312,11 @@ def edit(args):
 
 def _edit_unlocked(args):
     job=Path(args.job);current=docs.read_json(job/'turns.corrected.json');state=docs.read_json(job/'review-state.json')
-    new,edits,ids=docs.apply_review(current,docs.read_json(args.input))
+    payload=docs.read_json(args.input)
+    report=docs.preflight_review(current,payload)
+    if getattr(args,'check',False):return dict(status='preflight',**report)
+    if not report['valid']:raise ValueError(json.dumps(report,ensure_ascii=False))
+    new,edits,ids=docs.apply_review(current,payload)
     state['reviewed_ids']=sorted(set(state['reviewed_ids'])|set(ids));state['edits'].extend(edits)
     docs.save_review(job,new,state)
     return {'status':'review_saved','reviewed':len(state['reviewed_ids']),'total':len(new),'edits':len(state['edits'])}
@@ -348,6 +353,10 @@ def main():
     v.add_argument('--max-chars',type=int,default=6000,help='Bound batch text without truncating a turn')
     v.add_argument('--verbose',action='store_true',help='Include detailed source and manifest metadata')
     e=sub.add_parser('apply-edits',help='Apply auditable edits and record reviewed turn IDs');e.add_argument('job');e.add_argument('--input',required=True)
+    e.add_argument('--check',action='store_true',help='Validate all edits without saving or advancing review')
+    q=sub.add_parser('quality',help='Read local quality candidates; does not change review state');q.add_argument('job');q.add_argument('--offset',type=int,default=0);q.add_argument('--count',type=int,default=30)
+    q=sub.add_parser('clip',help='Extract a local WAV excerpt for one turn');q.add_argument('job');q.add_argument('--turn-id',required=True);q.add_argument('--context',type=float,default=3)
+    q=sub.add_parser('recheck',help='Re-recognize a bounded excerpt into a separate cache without applying edits');q.add_argument('job');q.add_argument('--turn-id',required=True);q.add_argument('--context',type=float,default=3)
     f=sub.add_parser('finalize',help='Export complete reviewed Markdown, raw copy, correction log and SRT');f.add_argument('job');f.add_argument('--output')
     args=p.parse_args()
     try:
@@ -362,6 +371,22 @@ def main():
             result=run(args,c)
         elif args.command=='review':result=review(args)
         elif args.command=='apply-edits':result=edit(args)
+        elif args.command=='quality':
+            if args.offset<0 or not 1<=args.count<=100:raise ValueError('offset >= 0 and count between 1 and 100 required')
+            with job_lock(args.job):
+                docs.recover_review(args.job)
+                result=quality.inspect(args.job)
+            candidates=result['issues'];result['total_candidates']=len(candidates)
+            result['issues']=candidates[args.offset:args.offset+args.count]
+            result['next_offset']=min(args.offset+args.count,len(candidates))
+        elif args.command=='clip':
+            with job_lock(args.job):
+                docs.recover_review(args.job)
+                result=quality.clip(args.job,args.turn_id,args.context)
+        elif args.command=='recheck':
+            with job_lock(args.job):
+                docs.recover_review(args.job)
+                result=quality.recheck(args.job,args.turn_id,c,args.context)
         else:result=finalize_job(args,c)
         emit(result)
     except Exception as exc:

@@ -1,46 +1,52 @@
 # y0-media-transcriber
 
-把视频、播客或本地录音转成带时间戳和说话人标签的 Markdown。语音识别在本机运行，支持 Windows CPU。通过 Codex 技能使用时，Codex 会逐段校对转录稿，修正有依据的错字，补标点和分段。
+发一条音视频链接，让 Agent 转录全文、修正明显错字、补标点、标注说话人，并保存为 Markdown。
 
-## 交给 Agent 安装和调用
+支持小宇宙、小红书、抖音、视频号、B站、YouTube，以及本地音视频和媒体直链。获取能力取决于内容权限和平台入口，不能保证每条链接都可下载。
 
-第一次使用时，把下面这段发给有本机终端权限的 Codex Agent，并替换最后一行。
+## 最快开始：把这段发给 Agent
 
-```text
-安装并调用 media-transcriber 技能处理下面的音视频。
-技能仓库是 https://github.com/yulindian/y0-media-transcriber.git。
-先检查本机是否已安装 media-transcriber。已安装就读取现有 SKILL.md 并复用配置。
-未安装时，读取仓库 README.md，按“手动安装”放入 Codex 技能目录并初始化环境，再读取 SKILL.md。
-按 SKILL.md 执行完整转录、说话人标注、逐批校对和验证导出，最后给我本地成稿链接。
-输入：<单条分享链接或本地文件路径>
-```
-
-以后直接调用 `$media-transcriber`，附上分享链接或本地文件路径。如果当前会话还未发现刚安装的技能，可让 Agent 读取本机技能目录中的 `media-transcriber/SKILL.md`，按文件中的命令完成当前任务。
-
-## 手动安装
-
-**1. 安装。** 在 Windows PowerShell 中准备 Git、uv、FFmpeg（含 `ffprobe`）和 `curl.exe`。克隆需要 GitHub 仓库访问权限。安装脚本用 uv 创建 Python 3.12 环境，首次运行会下载模型。
-
-```powershell
-$skillDir = Join-Path $env:USERPROFILE '.codex\skills\media-transcriber'
-git clone https://github.com/yulindian/y0-media-transcriber.git $skillDir
-Set-Location -LiteralPath $skillDir
-.\scripts\setup.ps1
-```
-
-使用自定义 Codex 技能目录时，将 `$skillDir` 改为对应路径。首次安装会生成 `config.json`，成稿默认写入「文档」下的「音视频转录」。可修改其中的 `output`。
-
-**2. 在 Codex 中发链接或本地文件。** 技能调用名是 `$media-transcriber`。
+复制下面的内容，替换最后一行即可：
 
 ```text
-用 $media-transcriber 完整转录这条链接，标注说话人，修正有依据的错字，
-补标点并按句意分段，保存为 Markdown。
-<单条分享链接或本地文件路径>
+请安装并使用这个技能转录音视频：
+https://github.com/yulindian/y0-media-transcriber
+
+先阅读仓库 README.md，再读取 SKILL.md，按其中步骤执行。
+如果已安装，请复用现有配置和运行环境；如果尚未安装，按 README 初始化。
+完成全文转录、说话人标注、逐段校对、标点分段、质量检查和验证导出。
+保留完整发言，不要改成摘要；不确定的文字或说话人保留疑点。
+最后给我本地 Markdown、原稿、纠错记录和字幕文件的路径。
+
+输入：<分享链接或本地文件的绝对路径>
 ```
 
-同一任务中断后，可以用原链接继续。长播客会分批校对，最后统一导出。
+**Agent 需要能读写本地文件、执行终端命令，并联网获取媒体和首次下载模型。** 当前安装脚本面向 Windows，语音识别在本机 CPU 运行，无需 GPU，也无需额外配置转录或纠错 API Key。
 
-## 输出示例
+支持读取 Markdown 指令并执行本地命令的 Agent 可以按此流程使用。Codex 可通过 `$media-transcriber` 调用；其他 Agent 若不支持这个语法，直接读取安装目录的 `SKILL.md` 并执行即可。仅能聊天、无法访问本机文件与终端的 Agent 不能独立运行本技能。
+
+## 已安装：发链接即可
+
+在已加载本技能的 Agent 中发送：
+
+```text
+用 media-transcriber 完整转录下面的音视频，校对错字、补标点、
+标注说话人并按话意分段，保存到 <输出目录>：
+<分享链接或本地文件的绝对路径>
+```
+
+在已经明确要转录的同一对话中，后续可以只发链接。任务中断后，用原链接或原任务目录继续，脚本会复用已完成的缓存。
+
+## 会得到什么
+
+| 文件 | 内容 |
+| --- | --- |
+| `.md` | 校对稿，包含来源、时间戳、说话人和自然段 |
+| `.原始.md` | 未校对的机器识别稿 |
+| `.纠错记录.json` | 每次修改的前后文本、理由与依据 |
+| `.srt` | 带说话人标签的字幕 |
+
+排版示例（虚构内容）：
 
 ```markdown
 [00:00:04] **说话人1**：我们先聊聊这个项目是怎么开始的。
@@ -48,43 +54,42 @@ Set-Location -LiteralPath $skillDir
 [00:00:09] **说话人2**：最初只是想把访谈录音整理成可以搜索的文字。
 ```
 
-上面是格式示例。完整导出包含四个文件：
+说话人编号由声音特征估计，不等于真实姓名。短应答、抢话和背景音乐可能影响归属。不确定的部分保留标记；文本校对、人工听审和说话人验证分别记录。
 
-| 文件 | 用途 |
-| --- | --- |
-| `.md` | 校对稿，保留来源、时间戳、说话人和自然段 |
-| `.原始.md` | 原始识别稿 |
-| `.纠错记录.json` | 记录修改前后的文字和依据 |
-| `.srt` | 带说话人标签的字幕 |
+## 手动安装（Windows）
 
-说话人编号来自声纹估计。多人重叠、短应答和背景音乐可能影响归属，已知人数可作为约束。
-
-## 支持的输入
-
-| 输入 | 获取方式 |
-| --- | --- |
-| 小红书视频 | 展开分享短链，通过 yt-dlp 获取，可使用已配置的匿名解析备用 |
-| 小宇宙公开单集 | 从节目页读取音频地址 |
-| 抖音视频 | 优先查询公开作品接口，备用入口为 yt-dlp 和匿名解析 |
-| 视频号 | 通过配置的解析服务获取，无需在微信中逐条播放 |
-| B站、YouTube | 优先使用 yt-dlp，可按配置使用匿名解析 |
-| 音视频直链、本地文件 | 直接下载或读取 FFmpeg 可识别的音轨 |
-
-默认配置按需向第三方解析服务发送分享链接。可以在 `config.json` 中将 `anonymous_api.enabled` 设为 `false`。视频号分享链接依赖该服务或自定义解析器。私有、付费或受平台限制的内容可能无法获取，可以改用有权访问的媒体直链或本地文件。
-
-## 命令行
-
-从仓库根目录运行。也可将仓库克隆到任意目录，仅使用 CLI。
+先准备 Git、uv、FFmpeg（含 `ffprobe`）和 `curl.exe`，在 PowerShell 中运行：
 
 ```powershell
-$config = Get-Content -LiteralPath .\config.json -Raw -Encoding utf8 | ConvertFrom-Json
-$py = Join-Path $config.runtime '.venv\Scripts\python.exe'
-& $py -X utf8 .\scripts\transcribe.py doctor
-& $py -X utf8 .\scripts\transcribe.py run 'C:\Media\interview.wav'
+# Codex 默认技能目录；其他 Agent 请改成其技能目录或普通工作目录。
+$skillDir = Join-Path $env:USERPROFILE '.codex\skills\media-transcriber'
+git clone https://github.com/yulindian/y0-media-transcriber.git $skillDir
+Set-Location -LiteralPath $skillDir
+.\scripts\setup.ps1
 ```
 
-`run` 生成原始稿并返回任务目录。CLI 用户需通过 `review → apply-edits → finalize` 完成校对和导出，Codex 技能会执行这套流程。
+首次安装会创建 Python 3.12 运行环境、下载模型并生成本地 `config.json`。成稿默认保存到「文档」下的「音视频转录」，可修改 `config.json` 的 `output`，或在调用时指定目录。已有安装先读取其配置，避免覆盖个人设置。
 
-- [使用指南](使用方案.md)涵盖配置、校对示例和故障排查。
-- [命令与恢复参考](references/operations.md)说明参数、缓存、导出和自定义解析器。
-- [效率与稳定性设计](效率与稳定性设计.md)介绍处理机制与开发检查。
+安装后，让 Agent 读取该目录的 [SKILL.md](SKILL.md)。它是执行入口；本 README 是安装和使用说明。
+
+## 平台与登录
+
+小宇宙公开单集优先从节目页获取音轨；其他平台按配置使用公开入口、yt-dlp 或匿名解析服务。视频号依赖已配置的解析服务或自定义解析器。
+
+默认不读取浏览器登录态。部分平台会将公开分享链接发送给配置的第三方解析服务，可在 `config.json` 设置 `anonymous_api.enabled=false` 关闭。需要 Cookie 时仅使用用户明确提供的文件。私有、付费或受限内容获取失败时，可改用有权访问的本地文件或媒体直链。
+
+## Agent 的执行入口
+
+按 [SKILL.md](SKILL.md) 执行以下流程：
+
+```text
+获取音轨 → 本地识别与说话人估计 → 分批校对 → 疑点检查 → 验证并导出
+```
+
+`run` 只生成待校对任务，不会自行完成文字校对。Agent 必须继续执行 `review → apply-edits`，完成全文审阅后执行 `quality → finalize`。可疑片段可用 `clip` 提取音轨，或用 `recheck` 局部重识别；候选文字需核实后再修改。
+
+- [SKILL.md](SKILL.md)：Agent 应遵循的步骤与交付要求。
+- [命令与恢复参考](references/operations.md)：参数、校对 JSON、质量检查、缓存和故障恢复。
+- [使用方案](使用方案.md)：常见场景与详细说明。
+
+当前提供 Windows 安装流程；macOS、Linux 和不同 Agent 的原生技能安装方式未逐一验证。

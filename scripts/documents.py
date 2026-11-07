@@ -120,7 +120,7 @@ def reset_review(job, turns):
     On write failure, recover_review completes the reset on the next locked call.
     """
     job=Path(job);recover_review(job);_validate_turns(turns)
-    state={'reviewed_ids':[],'edits':[],'reviewer':'Codex conservative ASR correction'}
+    state={'reviewed_ids':[],'edits':[],'reviewer':'Invoking agent conservative ASR correction'}
     backup={}
     for name in ('turns.raw.json','turns.corrected.json','review-state.json'):
         path=job/name
@@ -191,6 +191,29 @@ def apply_review(turns, review):
     return updated, edits, reviewed
 
 
+def preflight_review(turns, review):
+    """Collect per-edit errors without changing turns or review progress."""
+    errors=[]
+    if not isinstance(review,dict) or not isinstance(review.get('edits',[]),list):
+        return {'valid':False,'errors':[{'message':'Invalid review or edits'}]}
+    ids=review.get('reviewed_ids',[])
+    try:apply_review(turns,{'reviewed_ids':ids,'edits':[]})
+    except ValueError as exc:
+        return {'valid':False,'errors':[{'message':str(exc)}]}
+    seen=set()
+    by_id={t['id']:t for t in turns}
+    for index,e in enumerate(review.get('edits',[])):
+        tid=e.get('turn_id') if isinstance(e,dict) else None
+        try:
+            if not isinstance(tid,str) or tid not in by_id or tid not in ids:
+                raise ValueError('修改段落必须存在且标记已校对')
+            if isinstance(tid,str) and tid in seen:raise ValueError('Duplicate edit ID')
+            apply_review([by_id[tid]],{'reviewed_ids':[tid],'edits':[e]})
+        except ValueError as exc:errors.append({'index':index,'turn_id':tid,'message':str(exc)})
+        if isinstance(tid,str):seen.add(tid)
+    return {'valid':not errors,'errors':errors}
+
+
 def validate_final(manifest, turns, reviewed):
     if manifest.get('limit_seconds') is not None or not manifest.get('coverage_complete'):raise ValueError('音频仅处理部分或尚未完成，不能发布完整稿')
     if manifest.get('status') not in (None,'review_pending','complete'):
@@ -206,7 +229,8 @@ def _reading_turns(turns):
         certain=not any(marker in t['speaker'] for marker in ('待核对','未确定','/'))
         continuation=(previous is not None and certain
                       and previous['speaker']==t['speaker']
-                      and t['start']-previous['end']<=1
+                      and -.1<=t['start']-previous['end']<=1
+                      and len(grouped[-1]['text'])+len(t['text'])<=320
                       and not sentence_end.search(previous['text'].rstrip()))
         if continuation:
             # Do not add whitespace: a slice may split one word or number.
@@ -221,7 +245,16 @@ def _reading_turns(turns):
 
 def body(turns, reading=False):
     displayed=_reading_turns(turns) if reading else turns
-    return '\n\n'.join(f"[{clock(t['start'])}] **{t['speaker']}**：{t['text']}" for t in displayed)+'\n'
+    def paragraphs(text):
+        # Split only at existing punctuation; never invent intra-turn timestamps.
+        chunks=[];current=''
+        for sentence in re.split(r'(?<=[。！？!?；;])',text):
+            if current and len(current)+len(sentence)>160:
+                chunks.append(current);current=''
+            current+=sentence
+        if current:chunks.append(current)
+        return '\n\n'.join(chunks)
+    return '\n\n'.join(f"[{clock(t['start'])}] **{t['speaker']}**：{paragraphs(t['text']) if reading else t['text']}" for t in displayed)+'\n'
 
 
 def _duration_expected(info, manifest):
@@ -264,6 +297,8 @@ def markdown(info, manifest, turns, corrected=False):
         coverage_basis='source_duration_checked' if expected is not None else 'acquired_audio_only'
     attrs.update(acquisition=info.get('acquisition','unspecified'),acquisition_attempts=_acquisition_attempts(info),asr_language=manifest.get('asr_language','zh'),uses_user_credentials=info.get('uses_user_credentials'),
                  duration_expected=expected,coverage_basis=coverage_basis)
+    attrs.update(text_review_complete=bool(corrected),audio_review_status='not_verified',
+                 speaker_review_status='not_verified',render_version=2)
     yaml='---\n'+'\n'.join(k+': '+json.dumps(v,ensure_ascii=False) for k,v in attrs.items())+'\n---\n'
     warning='说话人编号为声纹估计，不代表真实姓名。短应答、抢话、笑声可能串人；“待核对”不能涵盖所有错误。'
     if manifest.get('speaker_report',{}).get('limited_evidence'):warning+=' 有效语音证据不足，短发言归属需核对。'

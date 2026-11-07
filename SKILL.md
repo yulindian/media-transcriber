@@ -7,7 +7,7 @@ description: 转录视频、播客或本地音视频，生成带时间戳和说�
 
 从真实音轨生成逐字稿，完成全文校对后保存并验证成稿。
 
-当用户显式调用 `$media-transcriber` 时，使用本文件和同目录下的脚本执行任务。有媒体输入就开始处理，缺少输入时请用户提供链接或文件路径。
+当用户调用 `media-transcriber`、`$media-transcriber`，或要求按本文件处理媒体时，使用本文件和同目录下的脚本执行任务。有媒体输入就开始处理，缺少输入时请用户提供链接或文件路径。当前安装流程面向 Windows；执行 Agent 需要本地文件读写与终端权限。不依赖特定 Agent 的技能注册语法，无法自动发现时直接读取本文件。
 
 ## 开始任务
 
@@ -26,9 +26,10 @@ $entry = '<skill-dir>\scripts\transcribe.py'
 ## 校对与导出
 
 1. 默认使用 `--speakers auto`。只有用户或本期来源提供人数依据时才设置明确人数，并填写 `--speaker-evidence`。使用「说话人1」「说话人2」等标签，姓名归属需经用户确认或从清晰音轨核实。短应答、抢话或声纹证据不足时保留不确定标记。
-2. `run` 返回 `review_pending` 后继续校对。若 `review_already_complete` 为真，直接执行 `finalize`。否则运行 `review JOB --next --count 60 --max-chars 6000`，按批次读取、核查并保存。校对由 Codex 完成，使用其他模型服务需用户明确指定。
-3. 用文件工具写 UTF-8 校对 JSON，再运行 `apply-edits JOB --input FILE`。只把实际核查过的段落列入 `reviewed_ids`。每次修改记录段落 ID、完整的修改前后文本、理由与依据。保存本批后继续 `review --next`，直到没有未校对段落。[校对 JSON 格式](references/operations.md#校对与导出)
-4. 执行 `finalize JOB`，需要覆盖保存位置时传入 `--output`。确认返回 `complete` 或 `existing` 且 `verified: true`，回读成稿。交付校对 Markdown、原稿、纠错记录和 SRT，说明时长与实质疑点。
+2. `run` 返回 `review_pending` 后继续校对。若 `review_already_complete` 为真，跳到质量检查与导出。否则运行 `review JOB --next --count 60 --max-chars 6000`，按批次读取、核查并保存。校对由当前调用技能的 Agent 完成，不要求另一个 Codex 进程；额外调用其他模型服务需用户明确指定。
+3. 用文件工具写 UTF-8 校对 JSON，再运行 `apply-edits JOB --input FILE`。脚本整批预检，错误带段落 ID，失败不推进校对；只检查时加 `--check`。只把实际核查过的段落列入 `reviewed_ids`。每次修改记录段落 ID、完整的修改前后文本、理由与依据。仅保存成功后继续 `review --next`，直到没有未校对段落。[校对 JSON 格式](references/operations.md#校对与导出)
+4. 运行 `quality JOB`，检查计数并分页查看疑点；用 `--offset` 续页。重点核查长段无标点、碎片及说话人跳变。对影响原意的可疑词句用 `recheck JOB --turn-id ID --context 3` 局部重识别，结合上下文比较候选；同模型候选不是独立验证，不能直接整段覆盖。需要听审时用 `clip JOB --turn-id ID --context 3` 提取音轨；无法听审时保留原词和疑点。检查方式见[质量检查与回听](references/operations.md#质量检查与回听)。
+5. 执行 `finalize JOB`，需要覆盖保存位置时传入 `--output`。确认返回 `complete` 或 `existing` 且 `verified: true`，回读成稿。交付校对 Markdown、原稿、纠错记录和 SRT，说明时长与实质疑点。文本审阅完成、音频听审和说话人验证分别说明，不能由已校对段落数推断后两者完成。
 
 后续命令沿用开始任务时的 `$py` 和 `$entry`。将 `$job` 设为 `run` 返回的 `job` 路径，将 `$editsFile` 设为本批校对 JSON 的路径。按上面的状态执行对应命令。
 
@@ -41,6 +42,7 @@ $entry = '<skill-dir>\scripts\transcribe.py'
 ## 校对判断
 
 - 修正有依据的同音错字、术语、标点与断句。保留发言顺序、否定、数字、单位、重复和语气。标题、字幕和节目页可用于核对术语，逐字稿以音轨为准。
+- 开始校对前从来源标题、简介和用户材料整理本期人名及术语，用于候选核对；词表不是音轨证据，不据此强行替换同音词或推断说话人。
 - 不确定的人名、数字和词句保留原识别，必要时复核对应音轨并标出疑点。校对护栏拒绝的修改保留原文并说明疑点。说话人标签与文字中的姓名分别核实。
 - 在同一段内可按话意换段，保留段落 ID、角色和时间戳。成稿排版会按条件拼接被切片拆断的连续发言。
 

@@ -39,6 +39,28 @@ $entry = '<skill-dir>\scripts\transcribe.py'
 
 没有确定错误的已读段落只列reviewed_ids，edits可空。before/after均为完整段落。脚本检查ID、旧文、理由、依据、否定词与长度。每批保存后重复 `review --next`，只取尚未校对的段落，默认不反复返回下载直链与完整诊断数据。`--max-chars`控制字符预算但不截断单段，需详细信息可加 `--verbose`。不要先把全部ID填完。日志保留每次修改，原稿不变。finalize检查覆盖、已校对ID、硬结构、完整审计链与四个导出文件的哈希；未满足拒绝完整稿。
 
+## 质量检查与回听
+
+```powershell
+& $py -X utf8 $entry apply-edits $job --input $editsFile --check
+& $py -X utf8 $entry quality $job --count 30
+& $py -X utf8 $entry quality $job --offset 30 --count 30
+& $py -X utf8 $entry clip $job --turn-id 't00001' --context 3
+& $py -X utf8 $entry recheck $job --turn-id 't00001' --context 3
+```
+
+`--check` 返回 `valid` 与包含段落 ID 的整批错误列表，不写入修改或已校对状态。正式保存也先执行同样预检；失败时整批不保存。不要在保存失败后自动推进下一批。
+
+`quality` 读取本地缓存，无需下载或运行模型。`counts` 是全量计数，`issues` 是分页结果；根据 `next_offset` 与 `total_candidates` 继续。短应答、相邻音轨重叠、多候选标签均可能合理，疑点计数不等于错误数量。它不能检出所有语义错误，也不能证明多人标注正确。
+
+`clip` 将原 WAV 对应片段及前后文保存到任务目录的 `review-clips`，返回实际时间范围、文本和说话人。默认前后各 3 秒，最大单段 120 秒。提取成功不代表回听或二次识别完成；具备音频读取能力时核实，缺少该能力时保留疑点。
+
+`recheck` 用本地识别模型重新处理带前后文的片段，独立缓存到 `review-clips/asr-ID`。原任务的识别缓存、校对和声纹不会改变。它沿用原任务语言，音频或模型改变时使片段缓存失效。返回的 `candidate_text` 包含前后文，不能直接替换目标段落。仍需通过有依据的 `apply-edits` 记录修改；同模型重复识别不能证明候选更正确，也不确认说话人身份。每个疑点默认重识别一次，无新证据不循环重试。
+
+Markdown 只合并同一确定说话人、无明显重叠、间隔不超过 1 秒且前句未结束的连续片段，限制合并长度；长段仅在已有标点处换段。不跨不确定角色合并，不为段内断句虚构时间戳。原稿、审计段落和 SRT 继续保留原时间切片。
+
+成稿分别记录 `text_review_complete`、`audio_review_status`、`speaker_review_status`。后两项当前保守标为 `not_verified`，文本审阅完成不能替代人工听审。自动质量检查不是全文准确率评估。
+
 ## 断点与缓存
 
 - 同一输入和试跑长度映射同一job；可显式 `--job` 恢复。原输入或试跑长度不同会拒绝复用。
