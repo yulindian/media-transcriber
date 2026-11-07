@@ -4,6 +4,16 @@
   "threads": 4,
   "asr_language": "auto",
   "segmentation_shift": 0.5,
+  "limits": {
+    "max_download_bytes": 2147483648,
+    "max_audio_seconds": 7200,
+    "download_seconds": 600,
+    "convert_seconds": 600,
+    "metadata_seconds": 120,
+    "task_seconds": 14400,
+    "min_free_disk_bytes": 536870912,
+    "max_waveform_bytes": 2147483648
+  },
   "resolvers": {},
   "anonymous_api": {
     "enabled": true,

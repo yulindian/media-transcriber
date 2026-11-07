@@ -8,6 +8,7 @@ import re
 import subprocess
 import time
 import wave
+import resources
 from pathlib import Path
 
 import numpy as np
@@ -30,6 +31,7 @@ def audio_duration(path):
     with wave.open(str(path),'rb') as f:
         if f.getframerate()!=16000 or f.getnchannels()!=1 or f.getsampwidth()!=2:
             raise ValueError('Expected 16kHz mono PCM16 WAV')
+        resources.audio(f.getnframes()/16000);resources.remaining()
         return f.getnframes()/16000
 
 
@@ -174,7 +176,7 @@ def asr(job, models, threads=4, language='zh'):
             return cached
     a=audio(job/'audio.wav');duration=len(a)/16000;t0=time.monotonic()
     rec=sherpa_onnx.OfflineRecognizer.from_sense_voice(model=str(models/SENSE/'model.int8.onnx'),tokens=str(models/SENSE/'tokens.txt'),num_threads=threads,use_itn=True,language=language)
-    p=subprocess.run(['ffmpeg','-v','info','-i',str(job/'audio.wav'),'-af','silencedetect=noise=-30dB:d=0.2','-f','null','-'],capture_output=True,text=True,check=True)
+    p=subprocess.run(['ffmpeg','-v','info','-i',str(job/'audio.wav'),'-af','silencedetect=noise=-30dB:d=0.2','-f','null','-'],capture_output=True,text=True,check=True,timeout=min(resources.remaining(),resources.policy()['convert_seconds']))
     pauses=[float(x) for x in re.findall(r'silence_end: ([\d.]+)',p.stderr)]
     checkpoint=job/'asr.chunks.jsonl';sigfile=job/'asr.signature.json';chunks=[]
     same_signature=sigfile.exists() and read_json(sigfile).get('signature')==sig
@@ -191,9 +193,11 @@ def asr(job, models, threads=4, language='zh'):
     pos=chunks[-1]['end'] if chunks else 0;last=pos
     with checkpoint.open('a',encoding='utf-8') as f:
         while pos<duration:
+            resources.remaining();resources.disk(job)
             choices=[t for t in pauses if pos+10<t<=min(pos+25,duration)]
             end=max(choices) if choices else min(pos+25,duration)
             stream=rec.create_stream();stream.accept_waveform(16000,a[int(pos*16000):int(end*16000)]);rec.decode_stream(stream)
+            resources.remaining()
             r=stream.result;tokens=list(r.tokens);ts=[round(pos+t,3) for t in r.timestamps]
             if len(tokens)!=len(ts):raise ValueError('ASR token/time count mismatch')
             text=re.sub(r'<\|.*?\|>','',r.text).strip()
@@ -223,10 +227,12 @@ def diarize(job, models, count=None, shift=.5):
         if not config.validate():raise ValueError('Diarization models missing')
         sd=sherpa_onnx.OfflineSpeakerDiarization(config);last=[-1]
         def cb(n,total):
+            resources.remaining()
             step=int(n/total*10)
             if step>last[0]:print(f'SPEAKER regions {step*10}%',flush=True);last[0]=step
             return 0
         regions=[{'start':r.start,'end':r.end} for r in sd.process(a,callback=cb).sort_by_start_time()]
+        resources.remaining()
         _validate_regions(regions,duration)
         if not regions:
             result={'segments':[],'report':{'count':0,'count_mode':'unavailable','error':'未找到可用说话人语音区间'},'elapsed_this_run':time.monotonic()-t0}
@@ -234,6 +240,7 @@ def diarize(job, models, count=None, shift=.5):
         extractor=sherpa_onnx.SpeakerEmbeddingExtractor(sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(models/EMBED),num_threads=2))
         features=[]
         for i,s in enumerate(regions):
+            resources.remaining()
             mid=(s['start']+s['end'])/2;lo=max(s['start'],mid-3);hi=min(s['end'],mid+3)
             if hi-lo<.4:lo=max(0,mid-.2);hi=min(len(a)/16000,mid+.2)
             stream=extractor.create_stream();stream.accept_waveform(16000,a[int(lo*16000):int(hi*16000)]);stream.input_finished()

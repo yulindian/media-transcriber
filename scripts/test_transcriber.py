@@ -1,3 +1,4 @@
+from test_support import checked_export
 import unittest
 import tempfile
 import json
@@ -68,7 +69,7 @@ class PipelineTests(unittest.TestCase):
             documents.write_json(p/'manifest.json',m)
             documents.write_json(p/'source.json',{'id':'abc','title':'测试','source_url':'https://example.com','platform':'测试'})
             documents.write_json(p/'turns.raw.json',raw);documents.write_json(p/'turns.corrected.json',raw)
-            result=documents.finalize(p,out)
+            result=checked_export(p,out)
             self.assertNotEqual(result['path'],str(old))
             self.assertIn('新的正文',Path(result['path']).read_text(encoding='utf-8'))
 
@@ -85,8 +86,8 @@ class PipelineTests(unittest.TestCase):
             documents.write_json(p/'source.json',{'id':'abc','title':'测试','source_url':'https://example.com','platform':'测试'})
             documents.write_json(p/'turns.raw.json',turn);documents.write_json(p/'turns.corrected.json',turn)
             documents.write_json(p/'review-state.json',{'reviewed_ids':['t1'],'edits':[]})
-            documents.finalize(p,p/'one')
-            result=documents.finalize(p,p/'two')
+            checked_export(p,p/'one')
+            result=checked_export(p,p/'two')
             self.assertEqual(Path(result['path']).parent,p/'two')
 
 

@@ -1,3 +1,4 @@
+from test_support import checked_export
 import copy
 import hashlib
 import json
@@ -92,14 +93,14 @@ class ReadingRenderTests(unittest.TestCase):
                               ('turns.raw.json',turns),('turns.corrected.json',turns),('review-state.json',state)]:
                 d.write_json(job/name,data)
             before = {name:(job/name).read_bytes() for name in ('turns.raw.json','turns.corrected.json','review-state.json')}
-            result = d.finalize(job,job/'out')
+            result = checked_export(job,job/'out')
             text = Path(result['path']).read_text(encoding='utf-8')
             self.assertIn('前端。',text)
             srt = Path(result['subtitle']).read_text(encoding='utf-8')
             self.assertIn('00:00:00,000 --> 00:00:25,000\n说话人1：前',srt)
             self.assertIn('00:00:25,100 --> 00:00:26,000\n说话人1：端。',srt)
             self.assertEqual(before,{name:(job/name).read_bytes() for name in before})
-            self.assertEqual(d.finalize(job,job/'out')['status'],'existing')
+            self.assertEqual(checked_export(job,job/'out')['status'],'existing')
 
 
 if __name__ == '__main__':unittest.main()

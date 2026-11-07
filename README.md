@@ -14,7 +14,7 @@ https://github.com/yulindian/y0-media-transcriber
 
 先阅读仓库 README.md，再读取 SKILL.md，按其中步骤执行。
 如果已安装，请复用现有配置和运行环境；如果尚未安装，按 README 初始化。
-完成全文转录、说话人标注、逐段校对、标点分段、质量检查和验证导出。
+完成全文转录、说话人标注、逐段校对、标点分段、质量检查、疑点验收和验证导出。
 保留完整发言，不要改成摘要；不确定的文字或说话人保留疑点。
 最后给我本地 Markdown、原稿、纠错记录和字幕文件的路径。
 
@@ -56,6 +56,8 @@ https://github.com/yulindian/y0-media-transcriber
 
 说话人编号由声音特征估计，不等于真实姓名。短应答、抢话和背景音乐可能影响归属。不确定的部分保留标记；文本校对、人工听审和说话人验证分别记录。
 
+数值、日期、比例和常见单位的改动需要额外的音轨复核记录。导出前必须完成当前版本的质量检查与验收，保留疑点会在成稿中披露。检查通过不代表已逐句听审。
+
 ## 手动安装（Windows）
 
 先准备 Git、uv、FFmpeg（含 `ffprobe`）和 `curl.exe`，在 PowerShell 中运行：
@@ -70,6 +72,8 @@ Set-Location -LiteralPath $skillDir
 
 首次安装会创建 Python 3.12 运行环境、下载模型并生成本地 `config.json`。成稿默认保存到「文档」下的「音视频转录」，可修改 `config.json` 的 `output`，或在调用时指定目录。已有安装先读取其配置，避免覆盖个人设置。
 
+默认单条媒体最多 2 GiB、音轨最多 2 小时，并设有下载、转换和磁盘预算。更长任务可在本机资源允许时调整 `config.json.limits` 后续跑，具体字段见[资源预算](references/operations.md#资源预算与来源隐私)。
+
 安装后，让 Agent 读取该目录的 [SKILL.md](SKILL.md)。它是执行入口；本 README 是安装和使用说明。
 
 ## 平台与登录
@@ -78,15 +82,17 @@ Set-Location -LiteralPath $skillDir
 
 默认不读取浏览器登录态。部分平台会将公开分享链接发送给配置的第三方解析服务，可在 `config.json` 设置 `anonymous_api.enabled=false` 关闭。需要 Cookie 时仅使用用户明确提供的文件。私有、付费或受限内容获取失败时，可改用有权访问的本地文件或媒体直链。
 
+完整获取地址保留本地。导出元数据会移除来源链接中的签名参数和本地文件路径；正文中的原话保持原样。
+
 ## Agent 的执行入口
 
 按 [SKILL.md](SKILL.md) 执行以下流程：
 
 ```text
-获取音轨 → 本地识别与说话人估计 → 分批校对 → 疑点检查 → 验证并导出
+获取音轨 → 本地识别与说话人估计 → 分批校对 → 疑点检查与验收 → 验证并导出
 ```
 
-`run` 只生成待校对任务，不会自行完成文字校对。Agent 必须继续执行 `review → apply-edits`，完成全文审阅后执行 `quality → finalize`。可疑片段可用 `clip` 提取音轨，或用 `recheck` 局部重识别；候选文字需核实后再修改。
+`run` 只生成待校对任务，不会自行完成文字校对。Agent 必须继续执行 `review → apply-edits`，完成全文审阅后执行 `quality → accept-quality → finalize`。可疑片段可用 `clip` 提取音轨，或用 `recheck` 局部重识别；候选文字需核实后再修改。旧任务的校对缓存仍可复用，首次使用新版导出时需补做质量检查和验收。
 
 - [SKILL.md](SKILL.md)：Agent 应遵循的步骤与交付要求。
 - [命令与恢复参考](references/operations.md)：参数、校对 JSON、质量检查、缓存和故障恢复。

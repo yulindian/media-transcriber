@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urljoin, urlsplit, urlunsplit
 from urllib.request import getproxies
 
 import requests
+import resources
 from public_http import check_public_url, curl_redirects, get as public_get
 
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/150.0.0.0 Safari/537.36'
@@ -88,6 +89,7 @@ def metadata(url, cookies=None, config=None):
             result = anonymous.douyin_metadata(url, config)
             attempts[-1]['status']='success';result['acquisition_attempts'] = attempts
             return result
+        except resources.ResourceLimit:raise
         except ValueError:
             pass
     attempts.append({'route':'native','status':'failed'})
@@ -96,6 +98,7 @@ def metadata(url, cookies=None, config=None):
         attempts[-1]['status']='success';result['acquisition_attempts'] = attempts
         result['uses_user_credentials'] = bool(cookies)
         return result
+    except resources.ResourceLimit:raise
     except ValueError as native_error:
         if cookies or not anonymous.api_enabled(provider, config):
             raise
@@ -144,7 +147,7 @@ def _metadata_native(url, cookies=None, config=None):
         if not isinstance(adapter,list) or not all(isinstance(x,str) for x in adapter):
             raise ValueError('Resolver must be a JSON array of command arguments')
         try:
-            result=subprocess.run([x.replace('{url}',url) for x in adapter],capture_output=True,text=True,encoding='utf-8',timeout=90,check=True)
+            result=subprocess.run([x.replace('{url}',url) for x in adapter],capture_output=True,text=True,encoding='utf-8',timeout=min(90,resources.remaining(),resources.policy()['metadata_seconds']),check=True)
             d=json.loads(result.stdout)
             if not isinstance(d, dict) or not isinstance(d.get('media_url'), str):
                 raise ValueError('Resolver must return an object with media_url')
@@ -181,9 +184,11 @@ def _metadata_native(url, cookies=None, config=None):
 
 
 def _curl_download(url, target, public_only=True):
+    budget=resources.policy();seconds=min(300,budget['download_seconds'],resources.remaining())
+    resources.disk(target,budget['max_download_bytes'])
     command = ['curl', '--disable', '--fail', '--silent', '--show-error',
                '--proto', '=http,https', '--proto-redir', '=http,https', '--max-redirs', '5',
-               '--connect-timeout', '15', '--max-time', '300', '--user-agent', UA,
+               '--connect-timeout', '15', '--max-time', str(seconds), '--max-filesize',str(int(budget['max_download_bytes'])), '--user-agent', UA,
                '--header', 'Accept-Encoding: identity', '--output', str(target)]
     proxies = getproxies()
     scheme = urlsplit(url).scheme
@@ -192,7 +197,7 @@ def _curl_download(url, target, public_only=True):
         command += ['--proxy', proxy]
     try:
         result, output, _ = curl_redirects(command, http_url(url),
-            '%{http_code}\n%{content_type}\n%{size_download}', 310, public_only=public_only)
+            '%{http_code}\n%{content_type}\n%{size_download}', seconds, public_only=public_only)
     except (OSError, subprocess.SubprocessError):
         # A subprocess exception embeds the signed command; never forward it.
         raise ValueError('curl 媒体传输失败或超时') from None
@@ -210,7 +215,7 @@ def _curl_download(url, target, public_only=True):
             or content_type in ('application/json', 'application/xhtml+xml', 'application/xml')):
         raise ValueError('服务器返回的不是音视频媒体')
     size = target.stat().st_size
-    if not size or size != expected:
+    if not size or size != expected or size>budget['max_download_bytes']:
         raise ValueError('音视频媒体下载长度不匹配或为空')
     with target.open('rb') as stream:
         prefix = stream.read(512).lstrip(b'\xef\xbb\xbf \r\n\t').lower()
@@ -221,7 +226,10 @@ def _curl_download(url, target, public_only=True):
 
 def acquire(info, job, cookies=None):
     job=Path(job)
+    budget=resources.policy();end=resources.deadline(budget['download_seconds'])
+    resources.disk(job)
     if info.get('local_path'):
+        if Path(info['local_path']).stat().st_size>budget['max_download_bytes']:raise resources.ResourceLimit('本地媒体超过 max_download_bytes')
         return Path(info['local_path'])
     if info.get('media_url'):
         public_only=info.get('acquisition')!='configured_resolver'
@@ -235,7 +243,9 @@ def acquire(info, job, cookies=None):
                 saved=json.loads(manifest.read_text(encoding='utf-8'))
                 if (saved.get('url_hash') == url_hash and saved.get('size') == out.stat().st_size
                         and saved.get('size', 0) > 0 and saved.get('sha256') == file_hash(out)):
+                    if out.stat().st_size>budget['max_download_bytes']:raise resources.ResourceLimit('缓存媒体超过 max_download_bytes')
                     return out
+            except resources.ResourceLimit:raise
             except (OSError, ValueError, AttributeError):
                 pass
         tmp=out.with_suffix(out.suffix+'.part')
@@ -246,20 +256,25 @@ def acquire(info, job, cookies=None):
             else:
                 extra=info.get('media_headers') or {}
                 safe_headers={k:v for k,v in extra.items() if k.lower() in ('referer','user-agent','origin','accept') and isinstance(v,str)}
-                with public_get(http_url(info['media_url']),headers={'User-Agent':UA,**safe_headers,'Accept-Encoding':'identity'},stream=True,timeout=(25,90),public_only=public_only,guard_redirects=True) as r:
+                with public_get(http_url(info['media_url']),headers={'User-Agent':UA,**safe_headers,'Accept-Encoding':'identity'},stream=True,timeout=(min(25,resources.remaining(end)),min(90,resources.remaining(end))),public_only=public_only,guard_redirects=True) as r:
                     r.raise_for_status()
                     if r.status_code==206:raise ValueError('服务器只返回部分音视频媒体')
                     content_type=r.headers.get('Content-Type','').split(';')[0].strip().lower()
                     if content_type.startswith(('text/','image/')) or content_type in ('application/json','application/xhtml+xml','application/xml'):
                         raise ValueError('服务器返回的不是音视频媒体')
                     size=0
+                    length=r.headers.get('Content-Length')
+                    if length is not None and int(length)>budget['max_download_bytes']:raise resources.ResourceLimit('媒体超过 max_download_bytes')
                     head=b''
                     digest=hashlib.sha256()
                     with tmp.open('wb') as f:
                         for chunk in r.iter_content(1024*1024):
+                            resources.remaining(end)
                             if not chunk: continue
                             if len(head)<512: head=(head+chunk)[:512]
                             size+=len(chunk)
+                            if size>budget['max_download_bytes']:raise resources.ResourceLimit('媒体超过 max_download_bytes')
+                            resources.disk(job,len(chunk))
                             digest.update(chunk)
                             f.write(chunk)
                     prefix=head.lstrip(b'\xef\xbb\xbf \r\n\t').lower()
@@ -274,6 +289,7 @@ def acquire(info, job, cookies=None):
             manifest.unlink(missing_ok=True)
             tmp.replace(out)
             manifest_tmp.replace(manifest)
+        except resources.ResourceLimit:raise
         except (requests.RequestException, OSError, ValueError) as exc:
             raise ValueError(f'公开音视频下载失败：{redact(exc)}') from None
         finally:
@@ -281,19 +297,30 @@ def acquire(info, job, cookies=None):
             manifest_tmp.unlink(missing_ok=True)
         return out
     from yt_dlp import YoutubeDL
-    opts={'quiet':True,'no_warnings':True,'noplaylist':True,'socket_timeout':25,'retries':1,'logger':QuietLogger(),'format':'bestaudio/best','outtmpl':str(job/'source.%(ext)s')}
+    blocked=[None]
+    def progress(state):
+        try:
+            resources.remaining(end);resources.disk(job)
+            if max(state.get('downloaded_bytes') or 0,state.get('total_bytes') or 0)>budget['max_download_bytes']:
+                raise resources.ResourceLimit('媒体超过 max_download_bytes')
+        except resources.ResourceLimit as exc:blocked[0]=exc;raise
+    opts={'quiet':True,'no_warnings':True,'noplaylist':True,'socket_timeout':min(25,resources.remaining(end)),'retries':1,'logger':QuietLogger(),'format':'bestaudio/best','outtmpl':str(job/'source.%(ext)s'),'max_filesize':int(budget['max_download_bytes']),'progress_hooks':[progress]}
     if cookies: opts['cookiefile']=str(cookies)
     try:
         with YoutubeDL(opts) as ydl:
             result=ydl.extract_info(info['resolved_url'],download=True)
             if not isinstance(result, dict):
                 raise ValueError('下载器未取得单条音视频')
+            progress({'total_bytes':result.get('filesize') or result.get('filesize_approx') or 0})
             paths=[Path(x['filepath']) for x in result.get('requested_downloads',[]) if x.get('filepath')]
             paths.append(Path(ydl.prepare_filename(result)))
+    except resources.ResourceLimit:raise
     except Exception as exc:
+        if blocked[0] is not None:raise blocked[0]
         raise ValueError(f'音视频下载失败：{redact(exc)}。本次未取得音轨。') from None
     for p in paths:
-        if p.exists() and p.stat().st_size>0:return p
+        if p.exists() and p.stat().st_size>0:
+            progress({'downloaded_bytes':p.stat().st_size});return p
     raise ValueError('下载器没有产生有效音视频文件')
 
 
@@ -309,9 +336,19 @@ def convert(media, target, limit=None):
     target=Path(target)
     tmp=target.with_name(target.stem+'.converting.wav')
     cmd=['ffmpeg','-v','error','-y','-i',str(media),'-vn','-ar','16000','-ac','1']
-    if limit:cmd+=['-t',str(limit)]
-    subprocess.run(cmd+[str(tmp)],check=True,capture_output=True)
-    with wave.open(str(tmp),'rb') as f:
-        if f.getframerate()!=16000 or f.getnchannels()!=1 or f.getsampwidth()!=2 or f.getnframes()==0:
-            raise ValueError('FFmpeg output is not valid PCM16 mono 16kHz audio')
-    tmp.replace(target)
+    budget=resources.policy()
+    if limit and limit>budget['max_audio_seconds']:raise resources.ResourceLimit('试跑时长超过 max_audio_seconds')
+    cap=limit if limit else budget['max_audio_seconds']
+    # One extra second distinguishes oversized inputs from a complete capped file.
+    resources.disk(target,(cap+(0 if limit else 1))*32000)
+    cmd+=['-t',str(cap if limit else cap+1)]
+    try:
+        subprocess.run(cmd+[str(tmp)],check=True,capture_output=True,timeout=min(resources.remaining(),budget['convert_seconds']))
+        with wave.open(str(tmp),'rb') as f:
+            if f.getframerate()!=16000 or f.getnchannels()!=1 or f.getsampwidth()!=2 or f.getnframes()==0:
+                raise ValueError('FFmpeg output is not valid PCM16 mono 16kHz audio')
+            actual=f.getnframes()/16000
+        resources.audio(actual,parallel=True)
+        tmp.replace(target)
+    except subprocess.TimeoutExpired:raise resources.ResourceLimit('FFmpeg 转换超过 convert_seconds') from None
+    finally:tmp.unlink(missing_ok=True)

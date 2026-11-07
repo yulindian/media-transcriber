@@ -17,6 +17,11 @@ jobs/
 output/
 outputs/
 transcripts/
+review-clips/
+audit-reports/
+test-reports/
+test-results/
+samples/
 benchmarks/*.json
 *.wav
 *.mp3

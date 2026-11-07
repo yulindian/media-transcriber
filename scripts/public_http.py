@@ -9,6 +9,7 @@ from urllib.parse import urljoin, urlsplit
 from urllib.request import getproxies, proxy_bypass
 
 import requests
+import resources
 
 MAX_NON_STREAM_BYTES = 8 * 1024 * 1024
 _CURL_HEADERS = frozenset(('user-agent', 'accept', 'accept-language', 'referer', 'x-requested-with'))
@@ -96,7 +97,7 @@ def _curl_get(url, kwargs, proxies):
         output_format = '%{http_code}\n%{content_type}\n%{url_effective}'
         try:
             result, output, _ = curl_redirects(
-                command, prepared, output_format, 65, public_only=public_only,
+                command, prepared, output_format, min(65,resources.remaining(),resources.policy()['metadata_seconds']), public_only=public_only,
                 follow=kwargs.get('allow_redirects', True))
         except (OSError, subprocess.SubprocessError):
             raise ValueError('Public HTTP fallback transfer failed or timed out') from None
@@ -150,15 +151,21 @@ def get(url, *, allow_curl_fallback=False, public_only=False, guard_redirects=Fa
     inherited = {} if _bypass(parsed.hostname.lower()) else {
         key: value for key, value in proxies.items() if key in ('http', 'https', 'all') and value
     }
+    kwargs.setdefault('timeout', (10, 30))
+    end=resources.deadline(resources.policy()['metadata_seconds'])
+    wire={**kwargs,'stream':True}
+    timeout=kwargs['timeout']
+    pair=timeout if isinstance(timeout,tuple) else (timeout,timeout)
+    wire['timeout']=tuple(min(float(v),resources.remaining(end)) for v in pair)
     session = requests.Session()
     session.trust_env = False
     session.proxies = inherited
-    kwargs.setdefault('timeout', (10, 30))
     try:
         if public_only or guard_redirects:
-            options = dict(kwargs)
+            options = dict(wire)
             follow = options.pop('allow_redirects', True)
             for hop in range(6):
+                options['timeout']=tuple(min(v,resources.remaining(end)) for v in wire['timeout'])
                 result = session.get(url, allow_redirects=False, **options)
                 if not follow or not result.is_redirect:
                     break
@@ -170,7 +177,7 @@ def get(url, *, allow_curl_fallback=False, public_only=False, guard_redirects=Fa
                 url = target
                 options.pop('params', None)
         else:
-            result = session.get(url, **kwargs)
+            result = session.get(url, **wire)
         _check_url(result.url)
         if kwargs.get('stream'):
             close_response = result.close
@@ -187,9 +194,20 @@ def get(url, *, allow_curl_fallback=False, public_only=False, guard_redirects=Fa
 
             result.close = close
             return result
-        # Force buffering before closing the transport; .json()/.text remain usable.
-        if len(result.content) > MAX_NON_STREAM_BYTES:
-            raise ValueError('Public HTTP returned an oversized response')
+        # Enforce the limit during transfer, before buffering an unbounded body.
+        if result.headers.get('Content-Length') and int(result.headers['Content-Length'])>MAX_NON_STREAM_BYTES:
+            result.close();raise ValueError('Public HTTP returned an oversized response')
+        chunks=[];size=0
+        try:
+            if isinstance(getattr(result,'_content',None),bytes):iterator=[result.content]
+            else:iterator=result.iter_content(64*1024)
+            for chunk in iterator:
+                resources.remaining(end)
+                size+=len(chunk)
+                if size>MAX_NON_STREAM_BYTES:raise ValueError('Public HTTP returned an oversized response')
+                chunks.append(chunk)
+            result._content=b''.join(chunks);result._content_consumed=True
+        finally:result.close()
         session.close()
         return result
     except requests.RequestException:

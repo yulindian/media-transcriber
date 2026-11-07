@@ -19,6 +19,9 @@ $entry = '<skill-dir>\scripts\transcribe.py'
 & $py -X utf8 $entry review 'JOB绝对路径' --next --count 60 --max-chars 6000
 # 用文件工具写校对JSON，不把网页或转录正文拼入shell。
 & $py -X utf8 $entry apply-edits 'JOB绝对路径' --input '校对JSON绝对路径'
+& $py -X utf8 $entry quality 'JOB绝对路径'
+# 查看全部疑点并按下文格式准备验收 JSON
+& $py -X utf8 $entry accept-quality 'JOB绝对路径' --input '验收JSON绝对路径'
 & $py -X utf8 $entry finalize 'JOB绝对路径' --output '<output-dir>'
 ```
 
@@ -39,6 +42,19 @@ $entry = '<skill-dir>\scripts\transcribe.py'
 
 没有确定错误的已读段落只列reviewed_ids，edits可空。before/after均为完整段落。脚本检查ID、旧文、理由、依据、否定词与长度。每批保存后重复 `review --next`，只取尚未校对的段落，默认不反复返回下载直链与完整诊断数据。`--max-chars`控制字符预算但不截断单段，需详细信息可加 `--verbose`。不要先把全部ID填完。日志保留每次修改，原稿不变。finalize检查覆盖、已校对ID、硬结构、完整审计链与四个导出文件的哈希；未满足拒绝完整稿。
 
+数字、中文数词、日期、比例及常见中英文单位的序列发生变化时，还需要 `entity_review`。先通过 `clip` 提取当前段落，脚本会保存片段与元数据。核实音轨后，在对应 edit 中增加：
+
+```json
+"entity_review": {
+  "method": "audio_excerpt_review",
+  "clip_path": "<clip 返回的本任务 WAV 绝对路径>",
+  "quote": "<已核实的改后句子，关键数词和单位须与 after 一致>",
+  "note": "<核实依据与更改原因>"
+}
+```
+
+片段必须来自本任务 `review-clips`，其音轨哈希、片段哈希和段落版本必须一致。改过正文或音轨后需重新提取。普通 `reason/evidence` 不能替代这个入口；没有能力核实音轨时保留原词。字符串护栏可能把含数词的惯用语也列为关键变更，应按证据处理，不通过删除数字规避护栏。复核记录仍是调用 Agent 的声明，脚本不会自动证明音频内容正确。
+
 ## 质量检查与回听
 
 ```powershell
@@ -49,9 +65,24 @@ $entry = '<skill-dir>\scripts\transcribe.py'
 & $py -X utf8 $entry recheck $job --turn-id 't00001' --context 3
 ```
 
-`--check` 返回 `valid` 与包含段落 ID 的整批错误列表，不写入修改或已校对状态。正式保存也先执行同样预检；失败时整批不保存。不要在保存失败后自动推进下一批。
+`--check` 返回 `valid` 与包含段落 ID 的整批错误列表，不写入修改或已校对状态；预检失败退出码为 2。正式保存也先执行同样预检；失败时整批不保存。不要在保存失败后自动推进下一批。
 
-`quality` 读取本地缓存，无需下载或运行模型。`counts` 是全量计数，`issues` 是分页结果；根据 `next_offset` 与 `total_candidates` 继续。短应答、相邻音轨重叠、多候选标签均可能合理，疑点计数不等于错误数量。它不能检出所有语义错误，也不能证明多人标注正确。
+`quality` 无需下载或运行模型，会将检查快照写入任务目录 `quality-check.json`。`counts` 是全量计数，`issues` 是分页结果；根据 `next_offset` 与 `total_candidates` 继续。短应答、相邻音轨重叠、多候选标签均可能合理，疑点计数不等于错误数量。它不能检出所有语义错误，也不能证明多人标注正确。
+
+修正疑点后重新检查；需要保留的疑点逐段说明理由。核查完全部页后创建 UTF-8 验收 JSON：
+
+```json
+{
+  "snapshot_fingerprint": "<本次 quality 返回值>",
+  "accepted_issues": [
+    {"turn_id": "<实际疑点ID>", "reason": "<为何可以带这个疑点交付>"}
+  ]
+}
+```
+
+执行 `accept-quality JOB --input FILE`。没有疑点时列表为空。每个疑点段落只出现一次，全部疑点都须处理；零时长字幕是不能接受的结构错误。检查未覆盖全部正文或缺少当前验收时不能导出。
+
+快照绑定音轨、来源、原稿、校对稿、校对记录、关键实体复核材料和相关任务参数。任一项改变后，旧检查与验收失效。`quality_status` 分为 `accepted_no_detected_issues` 与 `accepted_with_disclosed_issues`，后者在 Markdown 和纠错记录中披露。它们都不等同于全文准确、人工听审或说话人验证。`verified` 的范围为 `artifact_integrity`。
 
 `clip` 将原 WAV 对应片段及前后文保存到任务目录的 `review-clips`，返回实际时间范围、文本和说话人。默认前后各 3 秒，最大单段 120 秒。提取成功不代表回听或二次识别完成；具备音频读取能力时核实，缺少该能力时保留疑点。
 
@@ -60,6 +91,29 @@ $entry = '<skill-dir>\scripts\transcribe.py'
 Markdown 只合并同一确定说话人、无明显重叠、间隔不超过 1 秒且前句未结束的连续片段，限制合并长度；长段仅在已有标点处换段。不跨不确定角色合并，不为段内断句虚构时间戳。原稿、审计段落和 SRT 继续保留原时间切片。
 
 成稿分别记录 `text_review_complete`、`audio_review_status`、`speaker_review_status`。后两项当前保守标为 `not_verified`，文本审阅完成不能替代人工听审。自动质量检查不是全文准确率评估。
+
+## 资源预算与来源隐私
+
+`config.json.limits` 可覆盖下列默认值；未配置时使用同样的有限默认值。预算值须为正数。
+
+| 字段 | 默认值 | 范围 |
+| --- | --- | --- |
+| `max_download_bytes` | 2147483648（2 GiB） | 远程媒体、已有媒体缓存及本地输入 |
+| `max_audio_seconds` | 7200 | 单次音轨最长 2 小时，超限不伪装成完整稿 |
+| `download_seconds` | 600 | requests/yt-dlp 下载预算；curl 还受 300 秒上限约束 |
+| `convert_seconds` | 600 | 转换及识别前 FFmpeg 检测进程超时 |
+| `metadata_seconds` | 120 | 单次 HTTP 元数据请求预算，自定义解析器另受 90 秒上限约束 |
+| `task_seconds` | 14400 | 一次 run/recheck 的协作式预算，不含跨命令 Agent 校对时间 |
+| `min_free_disk_bytes` | 536870912（512 MiB） | 保留磁盘余量；转换及 curl 会预留输出/下载容量 |
+| `max_waveform_bytes` | 2147483648 | 波形转换内存估算上限，不含模型内存 |
+
+下载时按块限制体积、时间和可写磁盘。转换最多尝试预算时长加 1 秒，以识别超长音轨；超限拒绝完整稿，临时输出清理，原文件和成功缓存保留。显式试跑仍严格按 `--limit-seconds` 处理。资源失败不会触发重新解析来源。
+
+FFmpeg 和 curl 子进程有超时，原生模型推理在切片、回调和阶段边界检查总预算，不能保证强制打断正在执行的 C++ 调用。当前不是进程隔离的硬内存/硬实时服务；需要严格服务级限制时仍需外部作业进程管理。yt-dlp 的总体预算在下载进度回调处检查，抽取元信息时还受网络超时约束。
+
+用于获取素材的完整来源保留在本地 `source.json`。导出的原稿和校对稿剥离 userinfo、签名参数和 fragment；仅允许特定平台公开作品定位参数（如 YouTube 的 `v`、B站的 `p`）。本地来源不导出个人绝对路径。公开链接因此可能需要重新登录或无法复用临时签名，不能把成稿来源当下载凭据。正文中实际说出的网址保持原样。
+
+导出的纠错记录将片段路径改为任务相对路径，并清理理由/依据中的网址签名；完整审计仍保存在任务目录。不要把本地任务目录作为公开样本上传。
 
 ## 断点与缓存
 
@@ -70,6 +124,7 @@ Markdown 只合并同一确定说话人、无明显重叠、间隔不超过 1 �
 - `--limit-seconds 30` 仅明确试跑，最终门控不能把它当来源全文。
 - 失败读 `manifest.json`，不要删除原素材或全局缓存。修复环境后用原命令续跑。
 - 校对与导出采用可恢复事务日志。中断后重试对应命令会向前恢复；日志校验失败则停止、保留现场。进程锁防止同时写同一任务，进程退出会自动释放，不要手工删锁制造并发。
+- 待恢复导出也必须通过当前验收；正文、音轨或来源变化后拒绝发布旧事务。旧版本未完成的导出事务缺少新策略版本时会停止：先保留并移出任务目录的 `export-transaction.json`，然后重新检查、验收和导出。不要删除原素材或已完成的校对记录。
 - `run --output`会记住本任务的输出目录，`finalize --output`可显式覆盖。仅计时变化不会另存重复成稿；来源、正文、角色等实质变化才重新导出。
 
 ## 可选平台解析适配器

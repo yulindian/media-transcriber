@@ -17,6 +17,7 @@ import sources
 import engine
 import documents as docs
 import quality
+import resources
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -65,7 +66,7 @@ def run(args,c):
         if hasattr(docs,'recover_review'):docs.recover_review(job)
         if (job/'export-transaction.json').exists():
             raise ValueError('上次导出尚未完成，请先运行 finalize 恢复导出')
-        return _run_unlocked(args,c)
+        with resources.scope(c):return _run_unlocked(args,c)
 
 
 def config():
@@ -147,6 +148,10 @@ def _run_unlocked(args,c):
             if args.source_url:info['source_url']=sources.http_url(args.source_url)
             if args.title:info['title']=args.title
             docs.write_json(info_file,info)
+        if limit is not None:resources.audio(limit,parallel=True)
+        elif info.get('duration') is not None:resources.audio(float(info['duration']),parallel=True)
+        if info.get('local_path') and Path(info['local_path']).stat().st_size>resources.policy()['max_download_bytes']:
+            raise resources.ResourceLimit('本地媒体超过 max_download_bytes')
         m.update(status='acquiring');docs.write_json(manifest_file,m)
         wav=job/'audio.wav';fingerprint=None
         if info.get('local_path'):fingerprint=docs.file_hash(info['local_path'])
@@ -155,6 +160,7 @@ def _run_unlocked(args,c):
             first_source=info
             m['download_attempts']=[]
             def acquire_route(descriptor):
+                resources.remaining();resources.disk(job)
                 attempt={'route':descriptor.get('acquisition','unknown'),'status':'failed'}
                 m['download_attempts'].append(attempt)
                 try:
@@ -165,6 +171,7 @@ def _run_unlocked(args,c):
                     docs.write_json(manifest_file,m)
             try:
                 media=acquire_route(info)
+            except resources.ResourceLimit:raise
             except ValueError:
                 if info.get('local_path'):
                     raise
@@ -178,6 +185,7 @@ def _run_unlocked(args,c):
                 docs.write_json(info_file,info)
                 try:
                     media=acquire_route(info)
+                except resources.ResourceLimit:raise
                 except ValueError:
                     import anonymous_sources as anonymous
                     native_routes={'yt-dlp','douyin_public_app'}
@@ -196,6 +204,7 @@ def _run_unlocked(args,c):
                     if args.title:info['title']=args.title
                     docs.write_json(info_file,info)
                     media=acquire_route(info)
+            resources.disk(job)
             sources.convert(media,wav,limit)
             m['audio_ready_sha256']=docs.file_hash(wav)
             docs.write_json(manifest_file,m)
@@ -205,6 +214,7 @@ def _run_unlocked(args,c):
             if f.getframerate()!=16000 or f.getnchannels()!=1 or f.getsampwidth()!=2 or not f.getnframes():
                 raise ValueError('识别输入不是有效的16kHz单声道PCM16音频')
             actual=f.getnframes()/16000
+            resources.audio(actual,parallel=True)
             digest=m['audio_ready_sha256']
             if m.get('signal_checked_sha256')!=digest:
                 nonzero=False
@@ -231,13 +241,15 @@ def _run_unlocked(args,c):
         count=None if args.speakers=='auto' else int(args.speakers)
         # One ASR stage and one speaker stage share the local CPU. ASR JSONL is resumable.
         with ThreadPoolExecutor(max_workers=2) as pool:
-            if language=='zh':a=pool.submit(engine.asr,job,Path(c['runtime'])/'models',c.get('threads',4))
-            else:a=pool.submit(engine.asr,job,Path(c['runtime'])/'models',c.get('threads',4),language=language)
-            d=pool.submit(engine.diarize,job,Path(c['runtime'])/'models',count,c.get('segmentation_shift',.5))
+            if language=='zh':a=resources.submit(pool,engine.asr,job,Path(c['runtime'])/'models',c.get('threads',4))
+            else:a=resources.submit(pool,engine.asr,job,Path(c['runtime'])/'models',c.get('threads',4),language=language)
+            d=resources.submit(pool,engine.diarize,job,Path(c['runtime'])/'models',count,c.get('segmentation_shift',.5))
             asr=a.result()
             try:speaker=d.result()
+            except resources.ResourceLimit:raise
             except Exception as exc:
                 speaker={'segments':[],'report':{'count':None,'count_mode':'unavailable','error':sources.redact(exc)}}
+        resources.remaining()
         chunks=asr['chunks']
         if not chunks or abs(chunks[0]['start'])>.01 or abs(chunks[-1]['end']-actual)>.01 or any(abs(x['end']-y['start'])>.01 for x,y in zip(chunks,chunks[1:])):
             raise ValueError('ASR 音频区间不连续或未覆盖全部输入')
@@ -271,9 +283,10 @@ def _run_unlocked(args,c):
         docs.write_json(manifest_file,m);docs.draft(job)
         state=docs.read_json(job/'review-state.json')
         already_reviewed=set(state['reviewed_ids'])=={t['id'] for t in turns}
-        return {'status':m['status'],'job':str(job),'raw_markdown':str(job/'原始识别稿.md'),'turn_count':len(turns),'audio_seconds':actual,'speaker_report':m['speaker_report'],'warnings':warnings,'review_already_complete':already_reviewed,'next':'finalize (cached review complete)' if already_reviewed else 'review --next → apply-edits → finalize','output':m.get('output_dir') or c['output']}
+        return {'status':m['status'],'job':str(job),'raw_markdown':str(job/'原始识别稿.md'),'turn_count':len(turns),'audio_seconds':actual,'speaker_report':m['speaker_report'],'warnings':warnings,'review_already_complete':already_reviewed,'next':'quality → accept-quality → finalize' if already_reviewed else 'review --next → apply-edits → quality → accept-quality → finalize','output':m.get('output_dir') or c['output']}
     except Exception as exc:
         m.update(status='failed',coverage_complete=False,error=sources.redact(exc));docs.write_json(manifest_file,m)
+        if isinstance(exc,resources.ResourceLimit):raise resources.ResourceLimit(m['error']) from None
         raise ValueError(m['error']) from None
 
 
@@ -313,10 +326,10 @@ def edit(args):
 def _edit_unlocked(args):
     job=Path(args.job);current=docs.read_json(job/'turns.corrected.json');state=docs.read_json(job/'review-state.json')
     payload=docs.read_json(args.input)
-    report=docs.preflight_review(current,payload)
+    report=docs.preflight_review(current,payload,job)
     if getattr(args,'check',False):return dict(status='preflight',**report)
     if not report['valid']:raise ValueError(json.dumps(report,ensure_ascii=False))
-    new,edits,ids=docs.apply_review(current,payload)
+    new,edits,ids=docs.apply_review(current,payload,job)
     state['reviewed_ids']=sorted(set(state['reviewed_ids'])|set(ids));state['edits'].extend(edits)
     docs.save_review(job,new,state)
     return {'status':'review_saved','reviewed':len(state['reviewed_ids']),'total':len(new),'edits':len(state['edits'])}
@@ -355,6 +368,7 @@ def main():
     e=sub.add_parser('apply-edits',help='Apply auditable edits and record reviewed turn IDs');e.add_argument('job');e.add_argument('--input',required=True)
     e.add_argument('--check',action='store_true',help='Validate all edits without saving or advancing review')
     q=sub.add_parser('quality',help='Read local quality candidates; does not change review state');q.add_argument('job');q.add_argument('--offset',type=int,default=0);q.add_argument('--count',type=int,default=30)
+    q=sub.add_parser('accept-quality',help='Accept current quality snapshot with explicit retained-issue reasons');q.add_argument('job');q.add_argument('--input',required=True)
     q=sub.add_parser('clip',help='Extract a local WAV excerpt for one turn');q.add_argument('job');q.add_argument('--turn-id',required=True);q.add_argument('--context',type=float,default=3)
     q=sub.add_parser('recheck',help='Re-recognize a bounded excerpt into a separate cache without applying edits');q.add_argument('job');q.add_argument('--turn-id',required=True);q.add_argument('--context',type=float,default=3)
     f=sub.add_parser('finalize',help='Export complete reviewed Markdown, raw copy, correction log and SRT');f.add_argument('job');f.add_argument('--output')
@@ -375,10 +389,14 @@ def main():
             if args.offset<0 or not 1<=args.count<=100:raise ValueError('offset >= 0 and count between 1 and 100 required')
             with job_lock(args.job):
                 docs.recover_review(args.job)
-                result=quality.inspect(args.job)
+                result=quality.check(args.job)
             candidates=result['issues'];result['total_candidates']=len(candidates)
             result['issues']=candidates[args.offset:args.offset+args.count]
             result['next_offset']=min(args.offset+args.count,len(candidates))
+        elif args.command=='accept-quality':
+            with job_lock(args.job):
+                docs.recover_review(args.job)
+                result=quality.accept(args.job,docs.read_json(args.input))
         elif args.command=='clip':
             with job_lock(args.job):
                 docs.recover_review(args.job)
@@ -386,11 +404,12 @@ def main():
         elif args.command=='recheck':
             with job_lock(args.job):
                 docs.recover_review(args.job)
-                result=quality.recheck(args.job,args.turn_id,c,args.context)
+                with resources.scope(c):result=quality.recheck(args.job,args.turn_id,c,args.context)
         else:result=finalize_job(args,c)
         emit(result)
+        if result.get('status')=='preflight' and not result.get('valid'):sys.exit(2)
     except Exception as exc:
-        emit({'status':'error','message':sources.redact(exc)});sys.exit(1)
+        emit({'status':'error','error_code':'resource_limit' if isinstance(exc,resources.ResourceLimit) else 'workflow_error','message':sources.redact(exc)});sys.exit(1)
 
 
 if __name__=='__main__':main()

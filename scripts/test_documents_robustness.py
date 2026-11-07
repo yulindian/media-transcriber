@@ -1,3 +1,4 @@
+from test_support import checked_export
 import copy
 import tempfile
 import unittest
@@ -15,14 +16,14 @@ class DocumentRobustnessTests(unittest.TestCase):
     def test_structure_changes_rejected(self):
         for key,value in [('start',1),('end',3),('speaker','其他人')]:
             changed=copy.deepcopy(self.raw);changed[0][key]=value;d.write_json(self.job/'turns.corrected.json',changed)
-            with self.subTest(key=key),self.assertRaises(ValueError):d.finalize(self.job,self.out)
+            with self.subTest(key=key),self.assertRaises(ValueError):checked_export(self.job,self.out)
     def test_failed_or_limited_run_cannot_publish_previously_reviewed_turns(self):
         path=self.job/'manifest.json'
         original=d.read_json(path)
         for change in ({'status':'failed'},{'status':'transcribing'},{'limit_seconds':1.9}):
             with self.subTest(change=change):
                 d.write_json(path,{**original,**change})
-                with self.assertRaises(ValueError):d.finalize(self.job,self.out)
+                with self.assertRaises(ValueError):checked_export(self.job,self.out)
         self.assertFalse(self.out.exists())
 
     def test_finalize_rejects_changed_audio(self):
@@ -32,47 +33,47 @@ class DocumentRobustnessTests(unittest.TestCase):
         d.write_json(path,manifest)
         audio.write_bytes(b'replacement')
         with self.assertRaisesRegex(ValueError,'音频或原稿已变化'):
-            d.finalize(self.job,self.out)
+            checked_export(self.job,self.out)
 
     def test_subtitle_blank_lines_do_not_split_a_cue(self):
         self.raw[0]['text']='第一段\n\n第二段'
         d.write_json(self.job/'turns.raw.json',self.raw)
         d.write_json(self.job/'turns.corrected.json',self.raw)
-        result=d.finalize(self.job,self.out)
+        result=checked_export(self.job,self.out)
         self.assertIn('第一段\n\n第二段',Path(result['path']).read_text(encoding='utf-8'))
         self.assertIn('第一段\n第二段',Path(result['subtitle']).read_text(encoding='utf-8'))
     def test_unlogged_text_change_rejected(self):
         changed=copy.deepcopy(self.raw);changed[0]['text']='我喜欢这件事情';d.write_json(self.job/'turns.corrected.json',changed)
-        with self.assertRaises(ValueError):d.finalize(self.job,self.out)
+        with self.assertRaises(ValueError):checked_export(self.job,self.out)
     def test_negation_deletion_rejected(self):
         with self.assertRaises(ValueError):d.apply_review(self.raw,{'reviewed_ids':['t1'],'edits':[{'turn_id':'t1','before':self.raw[0]['text'],'after':'我喜欢这件事情','reason':'错字','evidence':'上下文'}]})
     def test_punctuation_only_rejected(self):
         for text in ['   ','！！！','😀😀😀']:
             changed=copy.deepcopy(self.raw);changed[0]['text']=text;d.write_json(self.job/'turns.corrected.json',changed)
-            with self.subTest(text=text),self.assertRaises(ValueError):d.finalize(self.job,self.out)
+            with self.subTest(text=text),self.assertRaises(ValueError):checked_export(self.job,self.out)
     def test_missing_or_corrupt_companions_repaired(self):
         for field in ['raw_path','correction_log','subtitle']:
-            result=d.finalize(self.job,self.out);path=Path(result[field]);expected=path.read_bytes();path.unlink()
-            recovered=d.finalize(self.job,self.out)
+            result=checked_export(self.job,self.out);path=Path(result[field]);expected=path.read_bytes();path.unlink()
+            recovered=checked_export(self.job,self.out)
             self.assertEqual(Path(recovered[field]).read_bytes(),expected)
             Path(recovered[field]).write_text('损坏',encoding='utf-8')
-            recovered=d.finalize(self.job,self.out)
+            recovered=checked_export(self.job,self.out)
             self.assertEqual(Path(recovered[field]).read_bytes(),expected)
     def test_metadata_invalidates_cache(self):
-        first=d.finalize(self.job,self.out)
+        first=checked_export(self.job,self.out)
         source=d.read_json(self.job/'source.json');source['source_url']='https://changed.example';d.write_json(self.job/'source.json',source)
-        second=d.finalize(self.job,self.out)
+        second=checked_export(self.job,self.out)
         self.assertIn('https://changed.example',Path(second['path']).read_text(encoding='utf-8'))
         manifest=d.read_json(self.job/'manifest.json');manifest['speaker_report']={'count':9};d.write_json(self.job/'manifest.json',manifest)
-        third=d.finalize(self.job,self.out)
+        third=checked_export(self.job,self.out)
         self.assertIn('speaker_count: 9',Path(third['path']).read_text(encoding='utf-8'))
     def test_partial_export_recovers_without_duplicate(self):
         original=d.write_json
         def fail_manifest(path,data):
             if Path(path).name=='manifest.json':raise OSError('simulated interruption')
             return original(path,data)
-        with patch.object(d,'write_json',side_effect=fail_manifest),self.assertRaises(OSError):d.finalize(self.job,self.out)
-        result=d.finalize(self.job,self.out)
+        with patch.object(d,'write_json',side_effect=fail_manifest),self.assertRaises(OSError):checked_export(self.job,self.out)
+        result=checked_export(self.job,self.out)
         self.assertTrue(result['verified']);self.assertEqual(len(list(self.out.glob('*.srt'))),1)
     def test_review_transaction_recovers(self):
         changed,edits,_=d.apply_review(self.raw,{'reviewed_ids':['t1'],'edits':[{'turn_id':'t1','before':self.raw[0]['text'],'after':self.raw[0]['text']+'。','reason':'标点','evidence':'句末'}]})
@@ -85,7 +86,7 @@ class DocumentRobustnessTests(unittest.TestCase):
         d.recover_review(self.job)
         self.assertEqual(d.read_json(self.job/'turns.corrected.json'),changed)
         self.assertEqual(d.read_json(self.job/'review-state.json'),state)
-        d.finalize(self.job,self.out)
+        checked_export(self.job,self.out)
 
     def test_each_export_file_interruption_recovers(self):
         original=d._write_text
@@ -98,21 +99,21 @@ class DocumentRobustnessTests(unittest.TestCase):
                     if calls==fail_index:raise OSError('interrupted file write')
                 return original(path,text)
             with self.subTest(file=fail_index):
-                with patch.object(d,'_write_text',side_effect=interrupt),self.assertRaises(OSError):d.finalize(self.job,out)
-                result=d.finalize(self.job,out)
+                with patch.object(d,'_write_text',side_effect=interrupt),self.assertRaises(OSError):checked_export(self.job,out)
+                result=checked_export(self.job,out)
                 self.assertTrue(result['verified'])
                 self.assertEqual(len(list(out.iterdir())),4)
-                self.assertEqual(d.finalize(self.job,out)['status'],'existing')
+                self.assertEqual(checked_export(self.job,out)['status'],'existing')
 
     def test_damaged_export_journal_fails_before_publishing(self):
         original=d._write_text
         def interrupt(path,text):
             if Path(path).parent==self.out.resolve():raise OSError('interruption')
             return original(path,text)
-        with patch.object(d,'_write_text',side_effect=interrupt),self.assertRaises(OSError):d.finalize(self.job,self.out)
+        with patch.object(d,'_write_text',side_effect=interrupt),self.assertRaises(OSError):checked_export(self.job,self.out)
         journal=self.job/'export-transaction.json';data=d.read_json(journal)
         data['payload']['files'][0]['text']='damaged';d.write_json(journal,data)
-        with self.assertRaises(ValueError):d.finalize(self.job,self.out)
+        with self.assertRaises(ValueError):checked_export(self.job,self.out)
         self.assertEqual(list(self.out.iterdir()),[])
 
     def test_duplicate_invalid_timing_and_speaker_rejected(self):
@@ -129,17 +130,17 @@ class DocumentRobustnessTests(unittest.TestCase):
             edit={'turn_id':'t1','before':current[0]['text'],'after':self.raw[0]['text']+punctuation,'reason':'punctuation','evidence':'sentence ending'}
             current,edits,_=d.apply_review(current,{'reviewed_ids':['t1'],'edits':[edit]})
             state['edits'].extend(edits);d.save_review(self.job,current,state)
-        d.finalize(self.job,self.out)
+        checked_export(self.job,self.out)
         state['edits'][0]['before']='forged';d.write_json(self.job/'review-state.json',state)
-        with self.assertRaises(ValueError):d.finalize(self.job,self.out)
+        with self.assertRaises(ValueError):checked_export(self.job,self.out)
 
     def test_raw_metadata_and_audit_metadata_invalidate_cache(self):
-        d.finalize(self.job,self.out)
+        checked_export(self.job,self.out)
         raw=copy.deepcopy(self.raw);raw[0]['text']+='。'
         d.write_json(self.job/'turns.raw.json',raw);d.write_json(self.job/'turns.corrected.json',raw)
-        second=d.finalize(self.job,self.out);self.assertEqual(second['status'],'complete')
+        second=checked_export(self.job,self.out);self.assertEqual(second['status'],'complete')
         state=copy.deepcopy(self.state);state['reviewer']='different reviewer';d.write_json(self.job/'review-state.json',state)
-        third=d.finalize(self.job,self.out);self.assertEqual(third['status'],'complete')
+        third=checked_export(self.job,self.out);self.assertEqual(third['status'],'complete')
 
     def test_legacy_negation_error_and_restoration_replay(self):
         original=self.raw[0]['text'];intermediate=original.replace('不','')
@@ -147,7 +148,7 @@ class DocumentRobustnessTests(unittest.TestCase):
         state['edits']=[{'turn_id':'t1','before':original,'after':intermediate,'reason':'legacy typo correction','evidence':'old review'},
                         {'turn_id':'t1','before':intermediate,'after':original,'reason':'restore negation','evidence':'conservative restoration'}]
         d.write_json(self.job/'review-state.json',state)
-        self.assertTrue(d.finalize(self.job,self.out)['verified'])
+        self.assertTrue(checked_export(self.job,self.out)['verified'])
 
     def test_reset_recovers_each_triple_write_and_preserves_previous_bytes(self):
         for index,name in enumerate(['turns.raw.json','turns.corrected.json','review-state.json']):

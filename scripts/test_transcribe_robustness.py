@@ -1,3 +1,4 @@
+from test_support import checked_export
 import argparse
 import json
 import tempfile
@@ -102,10 +103,10 @@ class OrchestrationTests(unittest.TestCase):
             documents.write_json(p/'review-state.json',{'reviewed_ids':[t['id'] for t in turns],'edits':[]})
             m=documents.read_json(p/'manifest.json');m.update(coverage_complete=True,created_at='2026-11-03',elapsed_last_run=7)
             documents.write_json(p/'manifest.json',m)
-            first=documents.finalize(p,p/'out')
+            first=checked_export(p,p/'out')
             m=documents.read_json(p/'manifest.json');m['elapsed_last_run']=.5;m['asr_elapsed']=0
             documents.write_json(p/'manifest.json',m)
-            second=documents.finalize(p,p/'out')
+            second=checked_export(p,p/'out')
             self.assertEqual(second['status'],'existing')
             self.assertEqual(first['path'],second['path'])
 

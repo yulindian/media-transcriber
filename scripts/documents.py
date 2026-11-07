@@ -11,6 +11,7 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
+import privacy
 
 
 def read_json(path):
@@ -160,7 +161,32 @@ def filename(text):
     return text
 
 
-def apply_review(turns, review):
+_ENTITY = re.compile(r'(?:百分之)?(?:[+-]?\d+(?:[.,:/-]\d+)*|[零〇一二两三四五六七八九十百千万亿点]+)\s*(?:人民币|美元|美金|万元|亿元|摄氏度|华氏度|毫秒|分钟|小时|公里|千克|公斤|厘米|毫米|毫升|元|块|秒|分|时|天|日|周|月|年|岁|个|人|件|倍|米|克|升|度|℃|℉|°[CF]|%|％|(?:kg|mg|km|cm|mm|ml|usd|cny|rmb|gb|mb|kb|khz|mhz|hz|ms|seconds|minutes|hours|days|years|g|m|s|h|l)(?![A-Za-z]))?',re.I)
+
+
+def entities(text):
+    return [re.sub(r'\s+','',m.group()) for m in _ENTITY.finditer(unicodedata.normalize('NFKC',text))]
+
+
+def _entity_evidence(edit, turn, job):
+    evidence=edit.get('entity_review')
+    if job is None or not isinstance(evidence,dict) or evidence.get('method')!='audio_excerpt_review':
+        raise ValueError('关键数字/日期/比例/单位变化，需要 entity_review 和对应音轨片段复核')
+    if not isinstance(evidence.get('note'),str) or not evidence['note'].strip():raise ValueError('Missing entity review note')
+    if not isinstance(evidence.get('quote'),str) or entities(evidence['quote'])!=entities(edit['after']):
+        raise ValueError('复核 quote 中的关键实体必须与修改后文本一致')
+    root=(Path(job)/'review-clips').resolve()
+    clip=Path(evidence.get('clip_path','')).resolve()
+    if not clip.is_relative_to(root) or clip.suffix!='.wav' or not clip.is_file():raise ValueError('Entity evidence clip must be inside this job/review-clips')
+    record=read_json(clip.with_suffix('.json'))
+    audio=Path(job)/'audio.wav'
+    if (record.get('turn_sha256')!=_digest(turn) or record.get('turn_id')!=turn['id']
+            or record.get('clip_sha256')!=file_hash(clip) or not audio.is_file()
+            or record.get('audio_sha256')!=file_hash(audio)):
+        raise ValueError('Entity audio evidence is stale or changed; extract and review again')
+
+
+def apply_review(turns, review, job=None):
     _validate_turns(turns)
     if not isinstance(review,dict):raise ValueError('Invalid review')
     updated=copy.deepcopy(turns);by_id={t['id']:t for t in updated}
@@ -181,6 +207,7 @@ def apply_review(turns, review):
             raise ValueError('纠错需要完整 after、reason、evidence，不允许删除整段')
         if not _lexical_size(after):raise ValueError('Replacement must contain words')
         if not all(isinstance(e.get(k),str) and e[k].strip() for k in ('reason','evidence')):raise ValueError('Missing review explanation')
+        if entities(t['text'])!=entities(after):_entity_evidence(e,t,job)
         # Conservative lexical guard, not a general semantic equivalence test.
         for token in ('不','没','无','未','别','非','勿','莫','not','never','no',"n't"):
             count=lambda s: len(re.findall(r'\b'+token+r'\b',s,re.I)) if token.isascii() and token!="n't" else s.lower().count(token)
@@ -191,7 +218,7 @@ def apply_review(turns, review):
     return updated, edits, reviewed
 
 
-def preflight_review(turns, review):
+def preflight_review(turns, review, job=None):
     """Collect per-edit errors without changing turns or review progress."""
     errors=[]
     if not isinstance(review,dict) or not isinstance(review.get('edits',[]),list):
@@ -208,8 +235,8 @@ def preflight_review(turns, review):
             if not isinstance(tid,str) or tid not in by_id or tid not in ids:
                 raise ValueError('修改段落必须存在且标记已校对')
             if isinstance(tid,str) and tid in seen:raise ValueError('Duplicate edit ID')
-            apply_review([by_id[tid]],{'reviewed_ids':[tid],'edits':[e]})
-        except ValueError as exc:errors.append({'index':index,'turn_id':tid,'message':str(exc)})
+            apply_review([by_id[tid]],{'reviewed_ids':[tid],'edits':[e]},job)
+        except (ValueError,OSError) as exc:errors.append({'index':index,'turn_id':tid,'message':str(exc)})
         if isinstance(tid,str):seen.add(tid)
     return {'valid':not errors,'errors':errors}
 
@@ -290,7 +317,7 @@ def _acquisition_attempts(info):
 
 def markdown(info, manifest, turns, corrected=False):
     content=body(turns,reading=corrected)
-    attrs={'type':'media-transcript','title':info['title'],'source_platform':info.get('platform',''),'source_url':info['source_url'],'source_id':info['id'],'captured_at':manifest['created_at'],'audio_duration_seconds':manifest.get('audio_duration'),'body_complete':manifest.get('coverage_complete',False),'transcript_status':'已纠错机器转录' if corrected else '机器原始转录，未校对','speaker_count_mode':manifest.get('speaker_report',{}).get('count_mode','unavailable'),'speaker_count':manifest.get('speaker_report',{}).get('count'),'speaker_accuracy_verified':False,'audio_manually_verified':False,'body_sha256':hashlib.sha256(content.encode()).hexdigest()}
+    attrs={'type':'media-transcript','title':info['title'],'source_platform':info.get('platform',''),'source_url':privacy.source_url(info['source_url']),'source_id':info['id'],'captured_at':manifest['created_at'],'audio_duration_seconds':manifest.get('audio_duration'),'body_complete':manifest.get('coverage_complete',False),'transcript_status':'已纠错机器转录' if corrected else '机器原始转录，未校对','speaker_count_mode':manifest.get('speaker_report',{}).get('count_mode','unavailable'),'speaker_count':manifest.get('speaker_report',{}).get('count'),'speaker_accuracy_verified':False,'audio_manually_verified':False,'body_sha256':hashlib.sha256(content.encode()).hexdigest()}
     expected=_duration_expected(info,manifest)
     coverage_basis=manifest.get('coverage_basis')
     if coverage_basis not in ('source_duration_checked','acquired_audio_only','partial_audio'):
@@ -298,12 +325,15 @@ def markdown(info, manifest, turns, corrected=False):
     attrs.update(acquisition=info.get('acquisition','unspecified'),acquisition_attempts=_acquisition_attempts(info),asr_language=manifest.get('asr_language','zh'),uses_user_credentials=info.get('uses_user_credentials'),
                  duration_expected=expected,coverage_basis=coverage_basis)
     attrs.update(text_review_complete=bool(corrected),audio_review_status='not_verified',
-                 speaker_review_status='not_verified',render_version=2)
+                 speaker_review_status='not_verified',render_version=3)
+    if corrected:attrs.update(manifest.get('quality_delivery',{}))
     yaml='---\n'+'\n'.join(k+': '+json.dumps(v,ensure_ascii=False) for k,v in attrs.items())+'\n---\n'
     warning='说话人编号为声纹估计，不代表真实姓名。短应答、抢话、笑声可能串人；“待核对”不能涵盖所有错误。'
     if manifest.get('speaker_report',{}).get('limited_evidence'):warning+=' 有效语音证据不足，短发言归属需核对。'
     if coverage_basis=='acquired_audio_only':warning+=' 完整性仅覆盖已取得的音轨，未核验源平台总时长。'
     if not manifest.get('coverage_complete'):warning='【部分音频试跑，非完整稿】'+warning
+    if corrected and manifest.get('quality_delivery',{}).get('accepted_issue_turns'):
+        warning+=' 本稿保留 '+str(manifest['quality_delivery']['accepted_issue_turns'])+' 段已说明原因的疑点，详见纠错记录中的 quality_acceptance。'
     return yaml+'\n# '+info['title'].replace('\n',' ')+'\n\n'+warning+'\n\n## 正文\n\n'+content
 
 
@@ -322,6 +352,12 @@ def _recover_export(job):
     journal=job/'export-transaction.json'
     if not journal.exists():return
     data=_read_transaction(journal)
+    if data.get('policy_version')!=2:
+        raise ValueError('旧版导出事务不满足当前隐私/验收策略；请保留并移出任务目录后重新 quality、accept-quality、finalize')
+    import quality
+    acceptance=quality.require_accepted(job)
+    if data.get('quality_fingerprint')!=acceptance['fingerprint']:
+        raise ValueError('待恢复导出对应的质量验收已过期；保留现场，不能发布旧稿')
     for record in data['files']:
         _write_text(record['path'],record['text'])
     m=read_json(job/'manifest.json');m.update(data['manifest_update'])
@@ -340,15 +376,18 @@ def finalize(job, output):
         audio=job/'audio.wav'
         if not audio.is_file() or _digest({'audio':file_hash(audio),'turns':raw})!=review_input:
             raise ValueError('音频或原稿已变化，请重新运行任务再导出')
+    import quality
+    acceptance=quality.require_accepted(job)
+    m['quality_delivery']=acceptance['delivery']
     out=Path(output).resolve();out.mkdir(parents=True,exist_ok=True)
     def stamp(t):
         ms=round(t*1000);return f'{ms//3600000:02d}:{ms//60000%60:02d}:{ms//1000%60:02d},{ms%1000:03d}'
     texts={'path':markdown(info,m,corrected,True),'raw_path':markdown(info,m,raw),
-           'correction_log':json.dumps(review,ensure_ascii=False,indent=2)+'\n',
+           'correction_log':json.dumps(privacy.audit({**review,'quality_acceptance':acceptance}),ensure_ascii=False,indent=2)+'\n',
            'subtitle':'\n\n'.join(f"{i}\n{stamp(t['start'])} --> {stamp(t['end'])}\n{t['speaker']}："+'\n'.join(line.strip() for line in t['text'].splitlines() if line.strip()) for i,t in enumerate(corrected,1))+'\n'}
     rendered_manifest={k:m[k] for k in ('created_at','audio_duration','coverage_complete','speaker_report','duration_expected','coverage_basis') if k in m}
     inputs={'manifest':rendered_manifest,'source':info,
-            'raw':raw,'corrected':corrected,'review':review}
+            'raw':raw,'corrected':corrected,'review':review,'quality_acceptance':acceptance}
     fingerprint=hashlib.sha256(json.dumps(inputs,ensure_ascii=False,sort_keys=True).encode('utf-8')).hexdigest()
     records=m.get('export_artifacts',{})
     if m.get('export_fingerprint')==fingerprint and set(records)==set(texts):
@@ -358,7 +397,7 @@ def finalize(job, output):
             expected=hashlib.sha256(text.encode('utf-8')).hexdigest()
             if path.parent.resolve()!=out or not path.is_file() or record.get('sha256')!=expected or file_hash(path)!=expected:
                 valid=False;break
-        if valid:return dict(status='existing',verified=True,**{k:v['path'] for k,v in records.items()})
+        if valid:return dict(status='existing',verified=True,verification_scope='artifact_integrity',**acceptance['delivery'],**{k:v['path'] for k,v in records.items()})
     base=datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d')+'-'+filename(info['title'])+'-'+filename(info['id'])[:20]
     suffixes={'path':'.md','raw_path':'.原始.md','correction_log':'.纠错记录.json','subtitle':'.srt'}
     n=1
@@ -372,7 +411,7 @@ def finalize(job, output):
             'review_sha256':file_hash(job/'review-state.json'),'final_turns_sha256':file_hash(job/'turns.corrected.json'),
             'export_fingerprint':fingerprint,'export_artifacts':records}
     # Persist all contents before publishing any file; retry rolls the same bundle forward.
-    _write_transaction(job/'export-transaction.json',{'files':[{'path':str(paths[key]),'text':text} for key,text in texts.items()],
+    _write_transaction(job/'export-transaction.json',{'policy_version':2,'quality_fingerprint':acceptance['fingerprint'],'files':[{'path':str(paths[key]),'text':text} for key,text in texts.items()],
                                               'manifest_update':update})
     _recover_export(job)
-    return dict(status='complete',verified=True,**{key:str(path) for key,path in paths.items()})
+    return dict(status='complete',verified=True,verification_scope='artifact_integrity',**acceptance['delivery'],**{key:str(path) for key,path in paths.items()})
