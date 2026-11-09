@@ -1,4 +1,4 @@
-# y0-media-transcriber
+# media-transcriber
 
 发一条音视频链接，让 Agent 转录全文、修正明显错字、补标点、标注说话人，并保存为 Markdown。
 
@@ -10,7 +10,7 @@
 
 ```text
 请安装并使用这个技能转录音视频：
-https://github.com/yulindian/y0-media-transcriber
+https://github.com/yulindian/media-transcriber
 
 先阅读仓库 README.md，再读取 SKILL.md，按其中步骤执行。
 如果已安装，请复用现有配置和运行环境；如果尚未安装，按 README 初始化。
@@ -65,7 +65,7 @@ https://github.com/yulindian/y0-media-transcriber
 ```powershell
 # Codex 默认技能目录；其他 Agent 请改成其技能目录或普通工作目录。
 $skillDir = Join-Path $env:USERPROFILE '.codex\skills\media-transcriber'
-git clone https://github.com/yulindian/y0-media-transcriber.git $skillDir
+git clone https://github.com/yulindian/media-transcriber.git $skillDir
 Set-Location -LiteralPath $skillDir
 .\scripts\setup.ps1
 ```
