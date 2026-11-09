@@ -252,12 +252,27 @@ def _reading_turns(turns):
     """Join continuations for display only; timestamps and audit turns stay intact."""
     grouped=[];previous=None
     sentence_end=re.compile(r'''[。！？!?…\.][”’"')）】》」』]*$''')
-    for t in turns:
+    # Omit standalone nonlexical responses only in the reading view.
+    displayed=[dict(t) for t in turns if not (
+        t['end']-t['start']<=2 and re.fullmatch(r'[嗯啊哦噢呃唔\s，。！？!?…]{1,4}',_without_review_notes(t['text'])))]
+    certain_label=lambda label:re.fullmatch(r'说话人\d+',label) is not None
+    for i,t in enumerate(displayed):
+        # A tiny shared-candidate slice between the same stable voice is a
+        # display continuation, not a verified reassignment in the audit data.
+        if (0<i<len(displayed)-1 and not certain_label(t['speaker'])
+                and len(_without_review_notes(t['text']))<=8 and t['end']-t['start']<=2):
+            left,right=displayed[i-1],displayed[i+1]
+            candidates=re.findall(r'说话人\d+',t['speaker'])
+            if (certain_label(left['speaker']) and left['speaker']==right['speaker']
+                    and left['speaker'] in candidates
+                    and -.1<=t['start']-left['end']<=1
+                    and -.1<=right['start']-t['end']<=1):
+                t['speaker']=left['speaker']
+    for t in displayed:
         certain=not any(marker in t['speaker'] for marker in ('待核对','未确定','/'))
         continuation=(previous is not None and certain
                       and previous['speaker']==t['speaker']
-                      and -.1<=t['start']-previous['end']<=1
-                      and len(grouped[-1]['text'])+len(t['text'])<=320
+                      and -.25<=t['start']-previous['end']<=1
                       and not sentence_end.search(previous['text'].rstrip()))
         if continuation:
             # Do not add whitespace: a slice may split one word or number.
@@ -279,6 +294,12 @@ def body(turns, reading=False, show_speakers=True):
     displayed=_reading_turns(turns) if reading else turns
     def paragraphs(text):
         # Split only at existing punctuation; never invent intra-turn timestamps.
+        repaired=[]
+        for part in re.split(r'\n\s*\n',text):
+            if repaired and not re.search(r'''[。！？!?；;…\.][”’"')）】》」』]*$''',repaired[-1].rstrip()):
+                repaired[-1]+=part
+            else:repaired.append(part)
+        text='\n\n'.join(repaired)
         chunks=[];current=''
         for sentence in re.split(r'(?<=[。！？!?；;])',text):
             if current and len(current)+len(sentence)>160:
@@ -341,7 +362,7 @@ def markdown(info, manifest, turns, corrected=False):
     attrs.update(acquisition=info.get('acquisition','unspecified'),acquisition_attempts=_acquisition_attempts(info),asr_language=manifest.get('asr_language','zh'),uses_user_credentials=info.get('uses_user_credentials'),
                  duration_expected=expected,coverage_basis=coverage_basis)
     attrs.update(text_review_complete=bool(corrected),audio_review_status='not_verified',
-                 speaker_review_status='not_verified',render_version=5)
+                 speaker_review_status='not_verified',render_version=6)
     if corrected:attrs.update(manifest.get('quality_delivery',{}))
     yaml='---\n'+'\n'.join(k+': '+json.dumps(v,ensure_ascii=False) for k,v in attrs.items())+'\n---\n'
     warning='说话人编号为声纹估计，不代表真实姓名。短应答、抢话、笑声可能串人；“待核对”不能涵盖所有错误。'

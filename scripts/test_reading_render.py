@@ -85,6 +85,47 @@ class ReadingRenderTests(unittest.TestCase):
         text = self.render([turn('t1','第一段。\n\n第二段的前',0,25),turn('t2','端。',25.2,27)])
         self.assertIn('第一段。\n\n第二段的前端。',text)
 
+    def test_ambiguous_fragments_between_same_voice_are_joined_for_reading_only(self):
+        turns=[turn('a','分享一下。',0,3,'说话人2'),
+               turn('b','我',3,3.2,'说话人1/说话人2'),
+               turn('c','就说，准备好了',3.2,6,'说话人2'),
+               turn('d','所以他',6,6.3,'说话人1/说话人2'),
+               turn('e','说，那我来。',6.3,9,'说话人2')]
+        original=copy.deepcopy(turns)
+        text=self.render(turns).split('## 正文\n\n',1)[1]
+        self.assertIn('我就说，准备好了所以他说，那我来。',text)
+        self.assertNotIn('**说话人1/说话人2**',text)
+        self.assertEqual(turns,original)
+
+    def test_long_continuation_never_splits_inside_a_sentence_or_number(self):
+        first='这里先介绍流程。'*60+'填好就能用，然后'
+        text=self.render([turn('a',first,0,25),turn('b','继续创建项目。批量复制，每次替换一',25,50),
+                          turn('c','个部分。下一步处理。',49.86,60)]).split('## 正文\n\n',1)[1]
+        self.assertIn('然后继续创建项目。',text)
+        self.assertIn('替换一个部分。',text)
+
+    def test_fragment_bridge_keeps_real_switches_gaps_and_unknown_voices(self):
+        for middle,right,start in [('说话人1/说话人2','说话人2',2),
+                                   ('说话人1/说话人2','说话人1',5),
+                                   ('说话人未确定','说话人1',2)]:
+            with self.subTest(middle=middle,right=right,start=start):
+                turns=[turn('a','说到这里。',0,1,'说话人1'),turn('b','我',1,1.2,middle),
+                       turn('c','继续说。',start,start+1,right)]
+                groups=d._reading_turns(turns)
+                self.assertEqual(groups[1]['speaker'],middle)
+                self.assertEqual(groups[1]['text'],'我')
+
+    def test_reading_omits_only_filler_responses_and_preserves_meaningful_answers(self):
+        turns=[turn('a','嗯',0,0.4),turn('b','不',1,1.4),turn('c','是',2,2.4),turn('d','对',3,3.4)]
+        text=self.render(turns).split('## 正文\n\n',1)[1]
+        self.assertNotIn('嗯',text)
+        self.assertIn('不是对',text)
+        self.assertIn('嗯',self.render(turns,False))
+
+    def test_internal_accidental_breaks_are_repaired_but_sentences_stay_separate(self):
+        text=self.render([turn('a','完整句子。\n\n然后\n\n继续执行，一\n\n个部分。',0,4)])
+        self.assertIn('完整句子。\n\n然后继续执行，一个部分。',text)
+
     def test_raw_markdown_retains_original_time_slices(self):
         turns = [turn('t1','前',0,25),turn('t2','端。',25,26)]
         text = self.render(turns,False)

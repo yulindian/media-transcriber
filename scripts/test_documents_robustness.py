@@ -40,7 +40,8 @@ class DocumentRobustnessTests(unittest.TestCase):
         d.write_json(self.job/'turns.raw.json',self.raw)
         d.write_json(self.job/'turns.corrected.json',self.raw)
         result=checked_export(self.job,self.out)
-        self.assertIn('第一段\n\n第二段',Path(result['path']).read_text(encoding='utf-8'))
+        self.assertIn('第一段第二段',Path(result['path']).read_text(encoding='utf-8'))
+        self.assertIn('第一段\n\n第二段',Path(result['raw_path']).read_text(encoding='utf-8'))
         self.assertIn('第一段\n第二段',Path(result['subtitle']).read_text(encoding='utf-8'))
     def test_unlogged_text_change_rejected(self):
         changed=copy.deepcopy(self.raw);changed[0]['text']='我喜欢这件事情';d.write_json(self.job/'turns.corrected.json',changed)
