@@ -105,8 +105,7 @@ class ReadingRenderTests(unittest.TestCase):
         self.assertIn('替换一个部分。',text)
 
     def test_fragment_bridge_keeps_real_switches_gaps_and_unknown_voices(self):
-        for middle,right,start in [('说话人1/说话人2','说话人2',2),
-                                   ('说话人1/说话人2','说话人1',5),
+        for middle,right,start in [('说话人1/说话人2','说话人1',5),
                                    ('说话人未确定','说话人1',2)]:
             with self.subTest(middle=middle,right=right,start=start):
                 turns=[turn('a','说到这里。',0,1,'说话人1'),turn('b','我',1,1.2,middle),
@@ -114,6 +113,41 @@ class ReadingRenderTests(unittest.TestCase):
                 groups=d._reading_turns(turns)
                 self.assertEqual(groups[1]['speaker'],middle)
                 self.assertEqual(groups[1]['text'],'我')
+
+    def test_cross_voice_word_fragment_keeps_joint_attribution_and_all_words(self):
+        turns=[turn('a','这是原有的',0,4,'说话人1'),
+               turn('b','生产方',4.1,4.6,'说话人1/说话人2'),
+               turn('c','式。',4.55,5.2,'说话人2')]
+        original=copy.deepcopy(turns)
+        text=self.render(turns).split('## 正文\n\n',1)[1]
+        self.assertEqual(text,'**说话人1/说话人2**：这是原有的生产方式。\n')
+        self.assertEqual(turns,original)
+
+    def test_sentence_tail_in_shared_slice_attaches_to_the_next_sentence(self):
+        turns=[turn('a','这样成本更高。比',0,2,'说话人1/说话人2'),
+               turn('b','如说，我们接着讨论。',1.98,8,'说话人1')]
+        text=self.render(turns).split('## 正文\n\n',1)[1]
+        self.assertIn('比如说，我们接着讨论。',text)
+        self.assertNotIn('。比\n\n',text)
+        self.assertNotIn('**说话人1**：比如',text)
+
+    def test_short_definite_voice_prefix_can_join_without_claiming_one_voice(self):
+        turns=[turn('a','所',0,.2,'说话人2'),turn('b','以我们继续讨论。',.18,4,'说话人1')]
+        text=self.render(turns).split('## 正文\n\n',1)[1]
+        self.assertEqual(text,'**说话人1/说话人2**：所以我们继续讨论。\n')
+
+    def test_shared_fragment_does_not_relabel_the_preceding_complete_sentence(self):
+        turns=[turn('a','先说一个完整观点。这里采用',0,4,'说话人1'),
+               turn('b','新方',4.1,4.4,'说话人1/说话人2'),turn('c','法。',4.38,5,'说话人2')]
+        text=self.render(turns).split('## 正文\n\n',1)[1]
+        self.assertEqual(text,'**说话人1**：先说一个完整观点。\n\n**说话人1/说话人2**：这里采用新方法。\n')
+
+    def test_independent_short_answers_stay_separate_and_are_not_dropped(self):
+        turns=[turn('a','可以吗？',0,2,'说话人1'),turn('b','不行。',2.1,3,'说话人2'),
+               turn('c','原因呢？',3.1,4,'说话人1')]
+        text=self.render(turns).split('## 正文\n\n',1)[1]
+        self.assertIn('**说话人2**：不行。',text)
+        self.assertEqual(text.count('\n\n'),2)
 
     def test_reading_omits_only_filler_responses_and_preserves_meaningful_answers(self):
         turns=[turn('a','嗯',0,0.4),turn('b','不',1,1.4),turn('c','是',2,2.4),turn('d','对',3,3.4)]

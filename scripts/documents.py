@@ -255,6 +255,17 @@ def _reading_turns(turns):
     # Omit standalone nonlexical responses only in the reading view.
     displayed=[dict(t) for t in turns if not (
         t['end']-t['start']<=2 and re.fullmatch(r'[嗯啊哦噢呃唔\s，。！？!?…]{1,4}',_without_review_notes(t['text'])))]
+    split=[]
+    for t in displayed:
+        ends=list(re.finditer(r'''[。！？!?…][”’"')）】》」』]*''',t['text']))
+        tail=t['text'][ends[-1].end():].strip() if ends else ''
+        if tail and 0<_lexical_size(_without_review_notes(tail))<=3:
+            # Reading-only pieces share the source slice's provenance. Their
+            # internal boundary is not an inferred word timestamp.
+            split.extend([{**t,'text':t['text'][:ends[-1].end()]},
+                          {**t,'text':tail,'_tail_fragment':True}])
+        else:split.append(t)
+    displayed=split
     certain_label=lambda label:re.fullmatch(r'说话人\d+',label) is not None
     for i,t in enumerate(displayed):
         # A tiny shared-candidate slice between the same stable voice is a
@@ -268,17 +279,35 @@ def _reading_turns(turns):
                     and -.1<=t['start']-left['end']<=1
                     and -.1<=right['start']-t['end']<=1):
                 t['speaker']=left['speaker']
+    def short_piece(item):
+        return (item.get('_tail_fragment') or item['end']-item['start']<=2) and 0<_lexical_size(_without_review_notes(item['text']))<=3
+    def known_roles(label):
+        label=_without_review_notes(label)
+        return re.findall(r'说话人\d+',label) if re.fullmatch(r'说话人\d+(?:/说话人\d+)*',label) else []
     for t in displayed:
         certain=not any(marker in t['speaker'] for marker in ('待核对','未确定','/'))
-        continuation=(previous is not None and certain
-                      and previous['speaker']==t['speaker']
+        same_voice=previous is not None and certain and previous['speaker']==t['speaker']
+        shared_fragment=(previous is not None and known_roles(previous['speaker']) and known_roles(t['speaker'])
+                         and (short_piece(previous) or (short_piece(t) and not sentence_end.search(t['text'].rstrip()))))
+        continuation=(previous is not None and (same_voice or shared_fragment)
                       and -.25<=t['start']-previous['end']<=1
                       and not sentence_end.search(previous['text'].rstrip()))
         if continuation:
+            if grouped[-1]['speaker']!=t['speaker']:
+                boundaries=list(re.finditer(r'''[。！？!?…][”’"')）】》」』]*''',grouped[-1]['text']))
+                if boundaries:
+                    cut=boundaries[-1].end();tail=grouped[-1]['text'][cut:]
+                    if tail.strip():
+                        fragment={**grouped[-1],'text':tail.lstrip()}
+                        grouped[-1]['text']=grouped[-1]['text'][:cut]
+                        grouped.append(fragment)
             # Do not add whitespace: a slice may split one word or number.
             # Existing punctuation, spaces and natural paragraphs remain verbatim.
             grouped[-1]['text']+=t['text']
             grouped[-1]['end']=max(grouped[-1]['end'],t['end'])
+            if grouped[-1]['speaker']!=t['speaker']:
+                roles=set(known_roles(grouped[-1]['speaker'])+known_roles(t['speaker']))
+                grouped[-1]['speaker']='/'.join(sorted(roles,key=lambda label:int(label.removeprefix('说话人'))))
         else:
             grouped.append(dict(t))
         previous=t
@@ -362,7 +391,7 @@ def markdown(info, manifest, turns, corrected=False, summary=None):
     attrs.update(acquisition=info.get('acquisition','unspecified'),acquisition_attempts=_acquisition_attempts(info),asr_language=manifest.get('asr_language','zh'),uses_user_credentials=info.get('uses_user_credentials'),
                  duration_expected=expected,coverage_basis=coverage_basis)
     attrs.update(text_review_complete=bool(corrected),audio_review_status='not_verified',
-                 speaker_review_status='not_verified',render_version=7)
+                 speaker_review_status='not_verified',render_version=8)
     if corrected:attrs.update(manifest.get('quality_delivery',{}))
     yaml='---\n'+'\n'.join(k+': '+json.dumps(v,ensure_ascii=False) for k,v in attrs.items())+'\n---\n'
     warning='说话人编号为声纹估计，不代表真实姓名。短应答、抢话、笑声可能串人；“待核对”不能涵盖所有错误。'
