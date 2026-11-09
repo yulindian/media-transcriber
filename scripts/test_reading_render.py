@@ -32,7 +32,7 @@ class ReadingRenderTests(unittest.TestCase):
         original = copy.deepcopy(turns)
         text = self.render(turns)
         self.assertIn('前端写了百分之九十九。',text)
-        self.assertEqual(text.count('**说话人1**'),1)
+        self.assertNotIn('**说话人1**',text)
         self.assertEqual(turns,original)
 
     def test_speaker_uncertainty_gap_and_sentence_end_keep_boundaries(self):
@@ -47,7 +47,28 @@ class ReadingRenderTests(unittest.TestCase):
         for a,b in cases:
             with self.subTest(a=a,b=b):
                 text = self.render([a,b])
-                self.assertIn(f"[{d.clock(b['start'])}] **{b['speaker']}**",text)
+                self.assertIn(f"[{d.clock(b['start'])}]",text)
+                if a['speaker']!=b['speaker'] or any(x in b['speaker'] for x in ('待核对','未确定','/')):
+                    self.assertIn(f"**{b['speaker']}**",text)
+
+    def test_single_speaker_reading_uses_paragraphs_without_role_labels(self):
+        text=self.render([turn('t1','先准备材料。',0,3),turn('t2','接着开始操作。',4,8)])
+        content=text.split('## 正文\n\n',1)[1]
+        self.assertEqual(content,'[00:00:00] 先准备材料。\n\n[00:00:04] 接着开始操作。\n')
+
+    def test_multiple_or_uncertain_speakers_keep_labels_even_with_count_one(self):
+        for speakers in [('说话人1','说话人2'),('说话人1','说话人未确定'),
+                         ('说话人1（待核对）','说话人1（待核对）'),('说话人1/说话人2','说话人1/说话人2')]:
+            with self.subTest(speakers=speakers):
+                text=self.render([turn('t1','你好。',0,2,speakers[0]),turn('t2','你好。',3,5,speakers[1])])
+                self.assertIn(f'**{speakers[0]}**',text)
+                self.assertIn(f'**{speakers[1]}**',text)
+
+    def test_single_visible_voice_does_not_override_multiple_or_unknown_count(self):
+        for report in ({'count':2},{}):
+            with self.subTest(report=report):
+                self.manifest['speaker_report']=report
+                self.assertIn('**说话人1**',self.render([turn('t1','你好。',0,2)]))
 
     def test_join_keeps_existing_natural_paragraphs(self):
         text = self.render([turn('t1','第一段。\n\n第二段的前',0,25),turn('t2','端。',25.2,27)])

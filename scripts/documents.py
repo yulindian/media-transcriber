@@ -270,7 +270,7 @@ def _reading_turns(turns):
     return grouped
 
 
-def body(turns, reading=False):
+def body(turns, reading=False, show_speakers=True):
     displayed=_reading_turns(turns) if reading else turns
     def paragraphs(text):
         # Split only at existing punctuation; never invent intra-turn timestamps.
@@ -281,7 +281,7 @@ def body(turns, reading=False):
             current+=sentence
         if current:chunks.append(current)
         return '\n\n'.join(chunks)
-    return '\n\n'.join(f"[{clock(t['start'])}] **{t['speaker']}**：{paragraphs(t['text']) if reading else t['text']}" for t in displayed)+'\n'
+    return '\n\n'.join(f"[{clock(t['start'])}] "+(f"**{t['speaker']}**：" if show_speakers else '')+(paragraphs(t['text']) if reading else t['text']) for t in displayed)+'\n'
 
 
 def _duration_expected(info, manifest):
@@ -316,7 +316,11 @@ def _acquisition_attempts(info):
 
 
 def markdown(info, manifest, turns, corrected=False):
-    content=body(turns,reading=corrected)
+    count=manifest.get('speaker_report',{}).get('count')
+    labels={t['speaker'] for t in turns}
+    single=(corrected and type(count) is int and count==1 and len(labels)==1
+            and re.fullmatch(r'说话人\d+',next(iter(labels))) is not None)
+    content=body(turns,reading=corrected,show_speakers=not single)
     attrs={'type':'media-transcript','title':info['title'],'source_platform':info.get('platform',''),'source_url':privacy.source_url(info['source_url']),'source_id':info['id'],'captured_at':manifest['created_at'],'audio_duration_seconds':manifest.get('audio_duration'),'body_complete':manifest.get('coverage_complete',False),'transcript_status':'已纠错机器转录' if corrected else '机器原始转录，未校对','speaker_count_mode':manifest.get('speaker_report',{}).get('count_mode','unavailable'),'speaker_count':manifest.get('speaker_report',{}).get('count'),'speaker_accuracy_verified':False,'audio_manually_verified':False,'body_sha256':hashlib.sha256(content.encode()).hexdigest()}
     expected=_duration_expected(info,manifest)
     coverage_basis=manifest.get('coverage_basis')
@@ -325,10 +329,11 @@ def markdown(info, manifest, turns, corrected=False):
     attrs.update(acquisition=info.get('acquisition','unspecified'),acquisition_attempts=_acquisition_attempts(info),asr_language=manifest.get('asr_language','zh'),uses_user_credentials=info.get('uses_user_credentials'),
                  duration_expected=expected,coverage_basis=coverage_basis)
     attrs.update(text_review_complete=bool(corrected),audio_review_status='not_verified',
-                 speaker_review_status='not_verified',render_version=3)
+                 speaker_review_status='not_verified',render_version=4)
     if corrected:attrs.update(manifest.get('quality_delivery',{}))
     yaml='---\n'+'\n'.join(k+': '+json.dumps(v,ensure_ascii=False) for k,v in attrs.items())+'\n---\n'
     warning='说话人编号为声纹估计，不代表真实姓名。短应答、抢话、笑声可能串人；“待核对”不能涵盖所有错误。'
+    if single:warning='本稿按单人发言排版，正文省略说话人标签；人数为识别估计，未经逐句听审。'
     if manifest.get('speaker_report',{}).get('limited_evidence'):warning+=' 有效语音证据不足，短发言归属需核对。'
     if coverage_basis=='acquired_audio_only':warning+=' 完整性仅覆盖已取得的音轨，未核验源平台总时长。'
     if not manifest.get('coverage_complete'):warning='【部分音频试跑，非完整稿】'+warning
