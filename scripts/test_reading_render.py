@@ -47,22 +47,33 @@ class ReadingRenderTests(unittest.TestCase):
         for a,b in cases:
             with self.subTest(a=a,b=b):
                 text = self.render([a,b])
-                self.assertIn(f"[{d.clock(b['start'])}]",text)
+                self.assertNotIn(f"[{d.clock(b['start'])}]",text)
                 if a['speaker']!=b['speaker'] or any(x in b['speaker'] for x in ('待核对','未确定','/')):
-                    self.assertIn(f"**{b['speaker']}**",text)
+                    self.assertIn(f"**{b['speaker'].replace('（待核对）','')}**",text)
 
     def test_single_speaker_reading_uses_paragraphs_without_role_labels(self):
         text=self.render([turn('t1','先准备材料。',0,3),turn('t2','接着开始操作。',4,8)])
         content=text.split('## 正文\n\n',1)[1]
-        self.assertEqual(content,'[00:00:00] 先准备材料。\n\n[00:00:04] 接着开始操作。\n')
+        self.assertEqual(content,'先准备材料。\n\n接着开始操作。\n')
 
     def test_multiple_or_uncertain_speakers_keep_labels_even_with_count_one(self):
         for speakers in [('说话人1','说话人2'),('说话人1','说话人未确定'),
                          ('说话人1（待核对）','说话人1（待核对）'),('说话人1/说话人2','说话人1/说话人2')]:
             with self.subTest(speakers=speakers):
                 text=self.render([turn('t1','你好。',0,2,speakers[0]),turn('t2','你好。',3,5,speakers[1])])
-                self.assertIn(f'**{speakers[0]}**',text)
-                self.assertIn(f'**{speakers[1]}**',text)
+                self.assertIn(f"**{speakers[0].replace('（待核对）','')}**",text)
+                self.assertIn(f"**{speakers[1].replace('（待核对）','')}**",text)
+
+    def test_reading_hides_review_annotations_but_preserves_speech_and_audit(self):
+        turns=[turn('t1','术语[词句待核对]，接续（片段接续待核对）。\n\n这件事有待核对，保留[示例]和（二选一）。',0,4,'说话人1（待核对）'),
+               turn('t2','名字【称呼待核对】(片段待核对)，继续。',5,8,'说话人2')]
+        original=copy.deepcopy(turns)
+        content=self.render(turns).split('## 正文\n\n',1)[1]
+        self.assertEqual(content,'**说话人1**：术语，接续。\n\n这件事有待核对，保留[示例]和（二选一）。\n\n**说话人2**：名字，继续。\n')
+        raw=self.render(turns,False)
+        self.assertIn('[00:00:00]',raw)
+        self.assertIn('[词句待核对]',raw)
+        self.assertEqual(turns,original)
 
     def test_single_visible_voice_does_not_override_multiple_or_unknown_count(self):
         for report in ({'count':2},{}):

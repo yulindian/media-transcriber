@@ -270,6 +270,11 @@ def _reading_turns(turns):
     return grouped
 
 
+def _without_review_notes(text):
+    """Hide bracketed editorial notes in reading exports, preserving source data."""
+    return re.sub(r'\[[^\[\]\n]{0,32}待核对\]|【[^【】\n]{0,32}待核对】|（[^（）\n]{0,32}待核对）|\([^()\n]{0,32}待核对\)', '', text)
+
+
 def body(turns, reading=False, show_speakers=True):
     displayed=_reading_turns(turns) if reading else turns
     def paragraphs(text):
@@ -281,7 +286,14 @@ def body(turns, reading=False, show_speakers=True):
             current+=sentence
         if current:chunks.append(current)
         return '\n\n'.join(chunks)
-    return '\n\n'.join(f"[{clock(t['start'])}] "+(f"**{t['speaker']}**：" if show_speakers else '')+(paragraphs(t['text']) if reading else t['text']) for t in displayed)+'\n'
+    chunks=[]
+    for t in displayed:
+        text=_without_review_notes(t['text']) if reading else t['text']
+        if not text.strip():continue
+        speaker=_without_review_notes(t['speaker']) if reading else t['speaker']
+        prefix='' if reading else f"[{clock(t['start'])}] "
+        chunks.append(prefix+(f'**{speaker}**：' if show_speakers else '')+(paragraphs(text) if reading else text))
+    return '\n\n'.join(chunks)+'\n'
 
 
 def _duration_expected(info, manifest):
@@ -329,10 +341,11 @@ def markdown(info, manifest, turns, corrected=False):
     attrs.update(acquisition=info.get('acquisition','unspecified'),acquisition_attempts=_acquisition_attempts(info),asr_language=manifest.get('asr_language','zh'),uses_user_credentials=info.get('uses_user_credentials'),
                  duration_expected=expected,coverage_basis=coverage_basis)
     attrs.update(text_review_complete=bool(corrected),audio_review_status='not_verified',
-                 speaker_review_status='not_verified',render_version=4)
+                 speaker_review_status='not_verified',render_version=5)
     if corrected:attrs.update(manifest.get('quality_delivery',{}))
     yaml='---\n'+'\n'.join(k+': '+json.dumps(v,ensure_ascii=False) for k,v in attrs.items())+'\n---\n'
     warning='说话人编号为声纹估计，不代表真实姓名。短应答、抢话、笑声可能串人；“待核对”不能涵盖所有错误。'
+    if corrected:warning='说话人标签为声音特征估计，未经逐句听审；复核信息见纠错记录。'
     if single:warning='本稿按单人发言排版，正文省略说话人标签；人数为识别估计，未经逐句听审。'
     if manifest.get('speaker_report',{}).get('limited_evidence'):warning+=' 有效语音证据不足，短发言归属需核对。'
     if coverage_basis=='acquired_audio_only':warning+=' 完整性仅覆盖已取得的音轨，未核验源平台总时长。'
