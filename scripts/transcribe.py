@@ -8,7 +8,8 @@ import time
 import wave
 import array
 import re
-from contextlib import contextmanager, ExitStack
+import copy
+from contextlib import contextmanager, ExitStack, redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -18,8 +19,11 @@ import engine
 import documents as docs
 import quality
 import resources
+import inputs
+import failures
 
 ROOT=Path(__file__).resolve().parents[1]
+RESULT_STREAM=sys.stdout
 
 
 @contextmanager
@@ -60,8 +64,10 @@ def output_for_job(job, explicit, c):
 
 
 def run(args,c):
-    key=hashlib.sha256((args.input.strip()+'|limit='+str(args.limit_seconds)).encode()).hexdigest()[:20]
-    job=Path(args.job) if args.job else Path(c['runtime'])/'jobs'/key
+    raw_input=args.input
+    args=copy.copy(args);args.input=inputs.normalize(raw_input)
+    job=inputs.job_path(raw_input,c['runtime'],args.limit_seconds,args.job)
+    args.job=str(job)
     with job_lock(job):
         if hasattr(docs,'recover_review'):docs.recover_review(job)
         if (job/'export-transaction.json').exists():
@@ -75,7 +81,7 @@ def config():
 
 
 def emit(data):
-    print(json.dumps(data,ensure_ascii=False,indent=2),flush=True)
+    print(json.dumps(data,ensure_ascii=False,indent=2),flush=True,file=RESULT_STREAM)
 
 
 def doctor(c):
@@ -125,18 +131,18 @@ def _checked_refresh(previous, refreshed, input_text):
 
 def _run_unlocked(args,c):
     input_text=args.input.strip();limit=args.limit_seconds
-    key=hashlib.sha256((input_text+'|limit='+str(limit)).encode()).hexdigest()[:20]
-    job=Path(args.job) if args.job else Path(c['runtime'])/'jobs'/key
+    job=Path(args.job) if args.job else inputs.job_path(input_text,c['runtime'],limit)
     job.mkdir(parents=True,exist_ok=True);manifest_file=job/'manifest.json'
     if manifest_file.exists():
         m=docs.read_json(manifest_file)
-        if m['input']!=input_text or m.get('limit_seconds')!=limit:
+        if inputs.identity(m['input'])!=inputs.identity(input_text) or m.get('limit_seconds')!=limit:
             raise ValueError('该工作目录属于不同输入或试跑长度，请使用新的 --job')
     else:
         m={'version':1,'input':input_text,'created_at':datetime.now(timezone(timedelta(hours=8))).isoformat(),'limit_seconds':limit,'status':'pending'}
     if args.output:m['output_dir']=str(Path(args.output).resolve())
     previous_review_input=m.get('review_input_sha256')
     previous_audio=m.get('audio_sha256')
+    previous_state={k:m[k] for k in ('status','coverage_complete','coverage_basis') if k in m}
     m.update(status='pending',coverage_complete=False)
     docs.write_json(manifest_file,m)
     try:
@@ -167,13 +173,16 @@ def _run_unlocked(args,c):
                     result=sources.acquire(descriptor,job,args.cookies)
                     attempt['status']='success'
                     return result
+                except Exception as exc:
+                    attempt.update(failures.describe(exc));attempt['message']=sources.redact(exc)
+                    raise
                 finally:
                     docs.write_json(manifest_file,m)
             try:
                 media=acquire_route(info)
             except resources.ResourceLimit:raise
-            except ValueError:
-                if info.get('local_path'):
+            except ValueError as first_error:
+                if info.get('local_path') or failures.should_stop_refresh(first_error):
                     raise
                 # Expiring signed URLs are refreshed only once during this invocation.
                 m['source_refreshes']=m.get('source_refreshes',0)+1
@@ -186,7 +195,8 @@ def _run_unlocked(args,c):
                 try:
                     media=acquire_route(info)
                 except resources.ResourceLimit:raise
-                except ValueError:
+                except ValueError as second_error:
+                    if failures.should_stop_refresh(second_error):raise
                     import anonymous_sources as anonymous
                     native_routes={'yt-dlp','douyin_public_app'}
                     provider=sources.platform(input_text)
@@ -205,6 +215,7 @@ def _run_unlocked(args,c):
                     docs.write_json(info_file,info)
                     media=acquire_route(info)
             resources.disk(job)
+            m['status']='normalizing';docs.write_json(manifest_file,m)
             sources.convert(media,wav,limit)
             m['audio_ready_sha256']=docs.file_hash(wav)
             docs.write_json(manifest_file,m)
@@ -236,6 +247,19 @@ def _run_unlocked(args,c):
         coverage=limit is None
         if not limit and expected is not None and actual<float(expected)-max(2,float(expected)*.001):
             raise ValueError('下载音轨长度明显短于节目时长，拒绝标记完整')
+        receipt={'schema':1,'source_id':str(info['id']),'platform':info.get('platform',''),
+                 'route':info.get('acquisition','local_file' if info.get('local_path') else 'unknown'),
+                 'audio_file':'audio.wav','audio_sha256':digest,'audio_bytes':wav.stat().st_size,
+                 'duration_seconds':actual,'sample_rate':16000,'channels':1,'sample_width':2,
+                 'partial':limit is not None,'source_duration_checked':expected is not None and limit is None}
+        docs.write_json(job/'audio-receipt.json',receipt)
+        if getattr(args,'prepare_only',False):
+            m.update(audio_duration=actual,audio_sha256=digest,status='partial' if limit else 'audio_ready',coverage_complete=False)
+            if previous_audio==digest and previous_state.get('status') in ('review_pending','complete','partial'):
+                m.update(previous_state)
+            docs.write_json(manifest_file,m)
+            return {'status':'audio_ready','job':str(job),'audio_path':str(wav),'receipt':str(job/'audio-receipt.json'),
+                    'audio_sha256':digest,'audio_seconds':actual,'partial':limit is not None,'next':'run same input or --job, then review → quality → accept-quality → finalize'}
         m.update(audio_duration=actual,coverage_complete=False,status='transcribing',audio_sha256=digest)
         docs.write_json(manifest_file,m)
         count=None if args.speakers=='auto' else int(args.speakers)
@@ -285,9 +309,9 @@ def _run_unlocked(args,c):
         already_reviewed=set(state['reviewed_ids'])=={t['id'] for t in turns}
         return {'status':m['status'],'job':str(job),'raw_markdown':str(job/'原始识别稿.md'),'turn_count':len(turns),'audio_seconds':actual,'speaker_report':m['speaker_report'],'warnings':warnings,'review_already_complete':already_reviewed,'next':'quality → accept-quality → finalize' if already_reviewed else 'review --next → apply-edits → quality → accept-quality → finalize','output':m.get('output_dir') or c['output']}
     except Exception as exc:
-        m.update(status='failed',coverage_complete=False,error=sources.redact(exc));docs.write_json(manifest_file,m)
+        m.update(failed_stage=m.get('status'),status='failed',coverage_complete=False,error=sources.redact(exc),**failures.describe(exc));docs.write_json(manifest_file,m)
         if isinstance(exc,resources.ResourceLimit):raise resources.ResourceLimit(m['error']) from None
-        raise ValueError(m['error']) from None
+        raise failures.WorkflowError(m['error'],failures.describe(exc)) from None
 
 
 def review(args):
@@ -354,13 +378,19 @@ def main():
     p=argparse.ArgumentParser(description=__doc__);sub=p.add_subparsers(dest='command',required=True)
     sub.add_parser('doctor',help='Check runtime, models and configuration')
     pr=sub.add_parser('probe',help='Inspect one URL without downloading media');pr.add_argument('url');pr.add_argument('--cookies')
-    r=sub.add_parser('run',help='Acquire, normalize, transcribe and label speakers; resumes cached stages')
-    r.add_argument('input',help='Single platform URL, direct media URL, or local media path')
-    r.add_argument('--source-url');r.add_argument('--title');r.add_argument('--job');r.add_argument('--output');r.add_argument('--cookies')
-    r.add_argument('--language',choices=['auto','zh','en','yue','ja','ko'],help='ASR language; new tasks use config, existing tasks keep their recorded language')
-    r.add_argument('--speakers',default='auto',choices=['auto']+[str(i) for i in range(1,13)])
-    r.add_argument('--speaker-evidence',default='',help='Evidence for a specified count; otherwise describe it as an assumption')
-    r.add_argument('--limit-seconds',type=float,help='Explicit partial test; never exports as a complete final')
+    for command in ('run','prepare'):
+        r=sub.add_parser(command,help='Acquire and verify audio'+(' without loading models' if command=='prepare' else ', then transcribe'))
+        r.set_defaults(prepare_only=command=='prepare')
+        r.add_argument('input',help='Single share text, URL or local media path')
+        r.add_argument('--source-url');r.add_argument('--title');r.add_argument('--job');r.add_argument('--output');r.add_argument('--cookies')
+        r.add_argument('--language',choices=['auto','zh','en','yue','ja','ko'],help='ASR language; new tasks use config, existing tasks keep their recorded language')
+        r.add_argument('--speakers',default='auto',choices=['auto']+[str(i) for i in range(1,13)])
+        r.add_argument('--speaker-evidence',default='',help='Evidence for a specified count')
+        r.add_argument('--limit-seconds',type=float,help='Explicit partial test; cannot export as complete')
+    b=sub.add_parser('batch',help='Persistent queue of single inputs; outputs remain drafts pending review')
+    b.add_argument('file');b.add_argument('--prepare-only',action='store_true');b.add_argument('--dry-run',action='store_true')
+    b.add_argument('--retry-failed',action='store_true');b.add_argument('--max-items',type=int,default=20)
+    b.add_argument('--output');b.add_argument('--cookies');b.add_argument('--limit-seconds',type=float)
     v=sub.add_parser('review',help='Read one batch of transcript turns for conservative correction');v.add_argument('job');v.add_argument('--offset',type=int,default=0);v.add_argument('--count',type=int,default=30)
     v.add_argument('--next',action='store_true',help='Return only not-yet-reviewed turns')
     v.add_argument('--max-chars',type=int,default=6000,help='Bound batch text without truncating a turn')
@@ -377,12 +407,15 @@ def main():
         c=config()
         if args.command=='doctor':result=doctor(c)
         elif args.command=='probe':
-            result=sources.metadata(args.url,args.cookies,c)
+            result=sources.metadata(inputs.normalize(args.url),args.cookies,c)
             result.pop('media_url',None)
             if 'resolved_url' in result:result['resolved_url']=sources.redact(result['resolved_url'])
-        elif args.command=='run':
+        elif args.command in ('run','prepare'):
             if args.limit_seconds is not None and args.limit_seconds<=0:raise ValueError('limit-seconds must be positive')
             result=run(args,c)
+        elif args.command=='batch':
+            import batch_jobs
+            result=batch_jobs.execute(args,c,run,job_lock)
         elif args.command=='review':result=review(args)
         elif args.command=='apply-edits':result=edit(args)
         elif args.command=='quality':
@@ -408,8 +441,10 @@ def main():
         else:result=finalize_job(args,c)
         emit(result)
         if result.get('status')=='preflight' and not result.get('valid'):sys.exit(2)
+        if result.get('status')=='batch_partial':sys.exit(1)
     except Exception as exc:
-        emit({'status':'error','error_code':'resource_limit' if isinstance(exc,resources.ResourceLimit) else 'workflow_error','message':sources.redact(exc)});sys.exit(1)
+        emit({'status':'error',**failures.describe(exc),'message':sources.redact(exc)});sys.exit(1)
 
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    with redirect_stdout(sys.stderr):main()

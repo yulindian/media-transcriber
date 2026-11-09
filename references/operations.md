@@ -11,6 +11,57 @@ $entry = '<skill-dir>\scripts\transcribe.py'
 
 配置的runtime下有 `.venv/Scripts/python.exe` 和 `models/`。模型缺失才执行 `scripts/setup.ps1`：复用官方SenseVoice int8、pyannote segmentation 3.0、CAM++缓存。环境为Python3.12、sherpa-onnx2.0.1、numpy、requests、yt-dlp与FFmpeg，无需GPU。
 
+## 音轨获取与交接
+
+```powershell
+& $py -X utf8 $entry prepare '<完整分享文案、单条URL或本地文件>'
+# 用 prepare 返回的 job 继续，不重复获取已验证音轨
+& $py -X utf8 $entry run '<同一输入>' --job '<返回的job>'
+```
+
+`prepare` 使用与 `run` 相同的平台路由、资源预算、缓存和时长检查，只执行获取、完整解码、16kHz 单声道 PCM16 校验和非全静音检查。它不加载识别/声纹模型。`audio-receipt.json` 记录来源 ID、路线、实际时长、音轨格式、字节数、SHA-256 和是否为试跑；不包含 Cookie、签名下载地址或浏览器登录信息。它证明音轨交接结构与内容哈希，不证明作品语义、转录准确率或人工听审。
+
+`audio_ready` 不能交付为全文；已进入校对/完成状态的同一音轨，重复 `prepare` 不会撤销已有校对状态。源素材或音轨改变后仍按现有签名与验收门槛重新核查。下载器报告的文件路径必须留在当前任务目录；用户明确提供的本地输入按其路径读取。
+
+单条完整分享文案由脚本提取唯一 URL，Markdown 中重复显示的同一链接会去重。直接提供的 URL 保留签名转义与查询顺序；不要人工重排参数。已识别的作品 ID 用于任务归一化（B站分P单独计入），旧的精确输入任务目录继续兼容。短链和未知媒体直链保持保守区分，`--job` 可显式指定已有任务。
+
+## 批量队列
+
+先用文件工具创建私有输入文件：TXT 每行一条分享文案或本地路径，也可用 JSON 字符串数组。空行和 TXT 中以 `#` 开头的行会跳过。文件不超过 1 MiB，默认去重后不超过 20 项；需要更大批次时显式设置 `--max-items`（最多 100）。
+
+```powershell
+& $py -X utf8 $entry batch '<输入文件绝对路径>' --dry-run
+& $py -X utf8 $entry batch '<同一文件>'
+# 只排查素材获取时，不进行识别
+& $py -X utf8 $entry batch '<同一文件>' --prepare-only
+# 稍后明确重试失败项
+& $py -X utf8 $entry batch '<同一文件>' --retry-failed
+```
+
+`--dry-run` 不创建队列或获取媒体，显示去重结果、原输入行号和输入疑点；预览中的查询值会脱敏。正常执行在 `<runtime>/queues/` 保存原输入和队列状态，此目录是私有运行数据，不应发布。相同输入文件路径、模式及试跑长度复用队列。新增项加入处理，移除项保留历史但不再执行；失败项默认保留到显式 `--retry-failed`。已经就绪的任务会重验证缓存，避免仅信任旧的完成标志。
+
+队列串行执行并使用独立进程锁；中断时正在处理项会在下次恢复。单项失败继续其他项，总任务或磁盘预算耗尽则保留尚未处理项。`task_seconds` 在同一次批量调用中共享，不为每一项重新获得整段时限。需要 Cookie 时沿用单条任务的明确文件授权规则。
+
+结果中的 `ready/failed/pending` 是音轨或待校对任务计数。`batch_ready` 不表示 Markdown 已生成，Agent 必须逐项完成 `run`（若只 prepare）、全文校对、质量验收及 `finalize`；不能用队列就绪数量冒充成稿数量。`batch_partial` 退出码为 1，结果仍保留全部任务状态与已成功获取的缓存。
+
+## 错误与 Agent 协议
+
+CLI 标准输出只包含一份 JSON 结果，模型及下载进度写入 stderr。不要将二者混合后按单个 JSON 解析。失败返回非零退出码与 `error_code/retryable/recovery_hint`；任务 `manifest.json` 还记录 `failed_stage`，下载尝试分别保存诊断。`retryable` 表示稍后可能重试，不是要求当前立即重试。
+
+| error_code | 后续动作 |
+| --- | --- |
+| `invalid_input` | 检查唯一链接、文件路径或批量输入格式 |
+| `dependency_missing` | 检查本工具环境、FFmpeg 和模型，运行 doctor |
+| `source_unavailable` | 核对失效作品或提供有权访问的本地文件，不重复刷新 |
+| `rate_limited` | 暂停该项，稍后显式重试，不连续请求解析服务 |
+| `authentication_required` | 用户明确授权的 Cookie 文件、本地文件或媒体直链 |
+| `access_denied` | 可能是权限或签名问题；只按既定上限刷新 |
+| `network_error` | 检查网络或已有代理后续跑 |
+| `resource_limit` | 检查体积、时长、磁盘和时间预算 |
+| `workflow_error` | 根据失败阶段和具体提示排查 |
+
+文本错误分类是保守提示，不是对所有平台错误语义的证明。遇到新类型错误保留现场，不能据此宣称源内容不存在或永久不可访问。
+
 ## 校对与导出
 
 `run`返回job后，依次执行：

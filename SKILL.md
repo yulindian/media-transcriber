@@ -13,15 +13,19 @@ description: 转录视频、播客或本地音视频，生成带时间戳和说�
 
 ## 开始任务
 
-1. 从分享文本提取单条 URL，保留原查询参数。多条输入按顺序去重、分别处理，单条失败后继续其余任务。相同输入或已有 `--job` 优先续跑。
+1. 单条输入可直接传完整分享文案或本地路径，脚本提取唯一链接并保留查询参数；多链接不猜测选择。多条输入写成 UTF-8 文本（每行一条）或 JSON 字符串数组，先执行 `batch FILE --dry-run` 检查去重结果，再执行 `batch FILE`。逐条继续处理就绪任务的校对与导出，单条失败后继续其余任务。[批量与恢复](references/operations.md#批量队列)
 2. 以本文件所在目录为技能根目录。读取本地 `config.json` 的 `runtime` 和 `output`。缺少配置时参考 [config.example.json](config.example.json)。首次运行或环境变化时用 `doctor` 检查，仅在缺少运行环境或模型时执行 `scripts/setup.ps1`。配置和恢复命令见 [运行参考](references/operations.md)。
 3. 使用已配置的 Python 运行技能脚本。用户指定保存位置时传入 `--output`。
+
+分享文案含引号或特殊字符时，先用文件工具写私有 UTF-8 输入文件，再以参数传入内容或交给 `batch`；不要把外部正文直接拼接为 shell 命令。
 
 ```powershell
 $py = '<runtime>\.venv\Scripts\python.exe'
 $entry = '<skill-dir>\scripts\transcribe.py'
 & $py -X utf8 $entry run '<分享链接或本地文件>'
 ```
+
+默认 `run` 已包含音轨获取与验证。排查平台获取问题时可用 `prepare INPUT` 单独生成标准音轨与 `audio-receipt.json`，不加载识别模型；其 `audio_ready` 仅表示音轨可用。随后用同一输入或 `--job` 继续 `run`。已知平台作品 ID 用于复用任务，B站不同分P保持独立；未知直链和签名参数不随意合并。
 
 默认走公开入口。启用匿名解析时，脚本会按平台配置将公开分享链接发送给解析服务。保持匿名模式。仅在用户明确提供 Cookie 文件时使用 `--cookies`，禁止读取浏览器登录态或将 Cookie 交给解析服务。公开入口失败时报告原因，可用媒体直链或本地文件继续。遇到视频号、解析配置或获取失败时，查看[平台解析参考](references/operations.md#可选平台解析适配器)。
 
@@ -55,6 +59,7 @@ $entry = '<skill-dir>\scripts\transcribe.py'
 ## 交付门槛
 
 - `review_pending` 是待校对草稿。失败或未完成任务按状态报告，简介、评论和摘要不能替代逐字稿。
+- `audio_ready`、`batch_ready` 也不是完整成稿。批量就绪后仍须对每个任务完成本文校对、验收和导出流程。失败读取 `error_code`、`failed_stage` 和 `recovery_hint`；限流或来源失效不原地循环重试，队列失败项稍后用 `--retry-failed` 显式重试。
 - 仅在明确试跑时使用 `--limit-seconds`，结果标为部分稿并留在任务目录。源总时长未知时，说明成稿覆盖已取得的音轨。
 - 中断时继续原任务；导出中断则先用 `finalize` 恢复。遇到任务锁等待原进程结束。[断点与缓存](references/operations.md#断点与缓存)
 - 超出资源预算时保留缓存并报告具体限制，不自动重复获取。默认媒体不超过 2 GiB、音轨不超过 2 小时；确需更大任务且本机资源允许时调整 `config.json.limits` 后续跑。限制与原生推理时限边界见运行参考。

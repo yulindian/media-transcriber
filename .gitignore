@@ -14,6 +14,7 @@ venv/
 runtime/
 models/
 jobs/
+queues/
 output/
 outputs/
 transcripts/
@@ -34,6 +35,8 @@ benchmarks/*.json
 *.jsonl
 
 # Generated files
+/.local/
+/.tmp/
 __pycache__/
 *.py[cod]
 .pytest_cache/

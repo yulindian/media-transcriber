@@ -37,6 +37,8 @@ https://github.com/yulindian/media-transcriber
 
 在已经明确要转录的同一对话中，后续可以只发链接。任务中断后，用原链接或原任务目录继续，脚本会复用已完成的缓存。
 
+也可以直接粘贴包含链接的完整分享文案。多条输入支持可续跑队列：Agent 会先预览去重结果，再逐项处理，单条失败不阻断其他任务。已知平台的同一作品可复用任务，B站不同分P分别处理。
+
 ## 会得到什么
 
 | 文件 | 内容 |
@@ -93,6 +95,8 @@ Set-Location -LiteralPath $skillDir
 ```
 
 `run` 只生成待校对任务，不会自行完成文字校对。Agent 必须继续执行 `review → apply-edits`，完成全文审阅后执行 `quality → accept-quality → finalize`。可疑片段可用 `clip` 提取音轨，或用 `recheck` 局部重识别；候选文字需核实后再修改。旧任务的校对缓存仍可复用，首次使用新版导出时需补做质量检查和验收。
+
+获取失败时可用 `prepare` 单独验证音轨；`batch` 提供预览、队列恢复及显式重试。命令的标准输出为 JSON，运行进度写入标准错误。音轨就绪、批量就绪均不代表逐字稿已完成。[批量及错误恢复说明](references/operations.md#批量队列)
 
 - [SKILL.md](SKILL.md)：Agent 应遵循的步骤与交付要求。
 - [命令与恢复参考](references/operations.md)：参数、校对 JSON、质量检查、缓存和故障恢复。

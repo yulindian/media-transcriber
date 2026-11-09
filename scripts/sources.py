@@ -11,6 +11,7 @@ from urllib.request import getproxies
 
 import requests
 import resources
+import failures
 from public_http import check_public_url, curl_redirects, get as public_get
 
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/150.0.0.0 Safari/537.36'
@@ -59,7 +60,7 @@ def normalize_xhs(url, _depth=0):
 
 def platform(url):
     h = (urlsplit(url).hostname or '').lower()
-    for hosts, name in [(('xiaohongshu.com','xhslink.com','xhslink.cn'),'小红书'),(('xiaoyuzhoufm.com',),'小宇宙'),(('douyin.com','iesdouyin.com'),'抖音'),(('channels.weixin.qq.com','weixin.qq.com'),'视频号'),(('bilibili.com','b23.tv'),'B站'),(('youtube.com','youtu.be'),'YouTube')]:
+    for hosts, name in [(('xiaohongshu.com','xhslink.com','xhslink.cn'),'小红书'),(('xiaoyuzhoufm.com',),'小宇宙'),(('douyin.com','iesdouyin.com','amemv.com'),'抖音'),(('channels.weixin.qq.com','weixin.qq.com'),'视频号'),(('bilibili.com','b23.tv'),'B站'),(('youtube.com','youtu.be'),'YouTube')]:
         if any(h == x or h.endswith('.'+x) for x in hosts):
             return name
     return '其他平台'
@@ -90,7 +91,8 @@ def metadata(url, cookies=None, config=None):
             attempts[-1]['status']='success';result['acquisition_attempts'] = attempts
             return result
         except resources.ResourceLimit:raise
-        except ValueError:
+        except ValueError as exc:
+            if failures.describe(exc)['error_code']=='rate_limited':raise
             pass
     attempts.append({'route':'native','status':'failed'})
     try:
@@ -100,6 +102,7 @@ def metadata(url, cookies=None, config=None):
         return result
     except resources.ResourceLimit:raise
     except ValueError as native_error:
+        if failures.describe(native_error)['error_code'] in ('source_unavailable','rate_limited'):raise
         if cookies or not anonymous.api_enabled(provider, config):
             raise
         attempts.append({'route':'anonymous_api','status':'failed'})
@@ -107,6 +110,7 @@ def metadata(url, cookies=None, config=None):
             result = anonymous.api_metadata(url, provider, config)
             attempts[-1]['status']='success';result['acquisition_attempts'] = attempts[:-1]+result.get('acquisition_attempts',[attempts[-1]])
             return result
+        except resources.ResourceLimit:raise
         except ValueError as api_error:
             raise ValueError(f'{provider}公开入口不可用：{redact(native_error)}；{redact(api_error)}。未取得音轨，不要求用户登录，可提供媒体文件继续。') from None
 
@@ -152,6 +156,7 @@ def _metadata_native(url, cookies=None, config=None):
             if not isinstance(d, dict) or not isinstance(d.get('media_url'), str):
                 raise ValueError('Resolver must return an object with media_url')
             http_url(d['media_url'])
+        except resources.ResourceLimit:raise
         except subprocess.TimeoutExpired:
             raise ValueError('配置的解析器超时，本次未取得音轨') from None
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
@@ -161,6 +166,7 @@ def _metadata_native(url, cookies=None, config=None):
     check_public_url(url)
     from yt_dlp import YoutubeDL
     opts={'quiet':True,'no_warnings':True,'noplaylist':True,'socket_timeout':15,'retries':0,'extractor_retries':0,'logger':QuietLogger(),'format':'bestaudio/best','usenetrc':False}
+    if provider=='抖音':opts['http_headers']={'Referer':'https://www.douyin.com/','User-Agent':UA}
     if shutil.which('node'):opts['js_runtimes']={'node':{'path':shutil.which('node')}}
     if cookies: opts['cookiefile']=str(cookies)
     try:
@@ -305,6 +311,7 @@ def acquire(info, job, cookies=None):
                 raise resources.ResourceLimit('媒体超过 max_download_bytes')
         except resources.ResourceLimit as exc:blocked[0]=exc;raise
     opts={'quiet':True,'no_warnings':True,'noplaylist':True,'socket_timeout':min(25,resources.remaining(end)),'retries':1,'logger':QuietLogger(),'format':'bestaudio/best','outtmpl':str(job/'source.%(ext)s'),'max_filesize':int(budget['max_download_bytes']),'progress_hooks':[progress]}
+    if info.get('platform')=='抖音':opts['http_headers']={'Referer':'https://www.douyin.com/','User-Agent':UA}
     if cookies: opts['cookiefile']=str(cookies)
     try:
         with YoutubeDL(opts) as ydl:
@@ -320,6 +327,8 @@ def acquire(info, job, cookies=None):
         raise ValueError(f'音视频下载失败：{redact(exc)}。本次未取得音轨。') from None
     for p in paths:
         if p.exists() and p.stat().st_size>0:
+            if not p.resolve().is_relative_to(job.resolve()):
+                raise ValueError('下载器返回任务目录外的文件，拒绝作为本次获取结果')
             progress({'downloaded_bytes':p.stat().st_size});return p
     raise ValueError('下载器没有产生有效音视频文件')
 

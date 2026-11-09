@@ -33,7 +33,10 @@ def policy():
 @contextmanager
 def scope(config):
     values=limits(config)
-    token=_ACTIVE.set((values,time.monotonic()+values['task_seconds']))
+    end=time.monotonic()+values['task_seconds']
+    parent=_ACTIVE.get()
+    if parent:end=min(end,parent[1])
+    token=_ACTIVE.set((values,end))
     try:yield
     finally:_ACTIVE.reset(token)
 

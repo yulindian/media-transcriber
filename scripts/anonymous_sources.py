@@ -5,13 +5,15 @@ import re
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import requests
+import failures
+import resources
 from public_http import get as public_get
 
 
 PLATFORM_HOSTS = {
     '小红书': ('xiaohongshu.com', 'xhslink.cn', 'xhslink.com'),
     '小宇宙': ('xiaoyuzhoufm.com',),
-    '抖音': ('douyin.com', 'iesdouyin.com'),
+    '抖音': ('douyin.com', 'iesdouyin.com', 'amemv.com'),
     '视频号': ('weixin.qq.com', 'channels.weixin.qq.com'),
     'B站': ('bilibili.com', 'b23.tv'),
     'YouTube': ('youtube.com', 'youtu.be'),
@@ -68,7 +70,9 @@ def api_metadata(url, provider, config):
             record['status']='success';attempts.append(record)
             result['acquisition_attempts']=attempts
             return result
-        except ValueError:
+        except resources.ResourceLimit:raise
+        except ValueError as exc:
+            if failures.describe(exc)['error_code']=='rate_limited':raise
             attempts.append(record)
     raise ValueError('已配置的匿名解析入口均未取得可用视频；未取得音轨')
 
@@ -97,7 +101,11 @@ def _api_metadata_once(url, provider, config):
            public_only=endpoint_host not in ('127.0.0.1','localhost','::1'), guard_redirects=True)
         response.raise_for_status()
         payload = response.json()
-    except (requests.RequestException, ValueError, TypeError):
+    except resources.ResourceLimit:raise
+    except (requests.RequestException, ValueError, TypeError) as exc:
+        diagnostic=failures.describe(exc)
+        if diagnostic['error_code']=='rate_limited':
+            raise failures.WorkflowError('匿名解析服务限流，本次停止请求',diagnostic) from None
         raise ValueError('匿名解析服务请求失败或返回非 JSON，未取得音轨') from None
     if not isinstance(payload, dict) or payload.get('code') != 200:
         raise ValueError('匿名解析服务未取得公开视频，可能受内容权限或服务状态限制')
@@ -167,7 +175,10 @@ def _native_id(url):
         return match[1] if match else None
     if any(host==item or host.endswith('.'+item) for item in PLATFORM_HOSTS['抖音']):
         match=re.fullmatch(r'/(?:share/)?video/(\d+)',path)
-        return match[1] if match else None
+        if match:return match[1]
+        if path not in ('','/recommend'):return None
+        values=parse_qs(parsed.query).get('modal_id',[])
+        return values[0] if len(values)==1 and values[0].isdigit() else None
     return None
 
 
@@ -183,24 +194,27 @@ def douyin_metadata(url, config=None):
     if not any(host == h or host.endswith('.' + h) for h in PLATFORM_HOSTS['抖音']):
         raise ValueError('不是抖音作品链接')
     try:
-        if host == 'v.douyin.com':
+        if _native_id(url) is None and (host=='v.douyin.com' or host=='amemv.com' or host.endswith('.amemv.com') or host=='iesdouyin.com' or host.endswith('.iesdouyin.com')):
             response = public_get(url, headers={'User-Agent': 'okhttp3'}, timeout=(10, 20), public_only=True)
             response.raise_for_status()
             url = _url(response.url)
             redirected_host = (urlsplit(url).hostname or '').lower()
             if not any(redirected_host == h or redirected_host.endswith('.' + h) for h in PLATFORM_HOSTS['抖音']):
                 raise ValueError('抖音短链跳转到未知平台')
-        match = re.search(r'/(?:share/)?video/(\d+)', urlsplit(url).path)
-        if not match:
+        identity=_native_id(url)
+        if not identity:
             raise ValueError('需要单条抖音视频，不能把主页、图集或直播当成视频')
-        identity = match[1]
         response = public_get('https://aweme.snssdk.com/aweme/v1/feed/', params={
             'aweme_id': identity, 'aid': '1128', 'version_name': '13.2.0',
             'version_code': '130200', 'device_platform': 'android',
         }, headers={'User-Agent': 'okhttp3'}, timeout=(10, 25), public_only=True)
         response.raise_for_status()
         payload = response.json()
-    except (requests.RequestException, TypeError):
+    except resources.ResourceLimit:raise
+    except (requests.RequestException, TypeError) as exc:
+        diagnostic=failures.describe(exc)
+        if diagnostic['error_code']=='rate_limited':
+            raise failures.WorkflowError('抖音公开入口限流，本次停止请求',diagnostic) from None
         raise ValueError('抖音公开接口请求失败，未取得音轨') from None
     except ValueError:
         raise ValueError('抖音作品链接或公开接口响应无效') from None
