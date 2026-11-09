@@ -348,7 +348,7 @@ def _acquisition_attempts(info):
     return safe
 
 
-def markdown(info, manifest, turns, corrected=False):
+def markdown(info, manifest, turns, corrected=False, summary=None):
     count=manifest.get('speaker_report',{}).get('count')
     labels={t['speaker'] for t in turns}
     single=(corrected and type(count) is int and count==1 and len(labels)==1
@@ -362,7 +362,7 @@ def markdown(info, manifest, turns, corrected=False):
     attrs.update(acquisition=info.get('acquisition','unspecified'),acquisition_attempts=_acquisition_attempts(info),asr_language=manifest.get('asr_language','zh'),uses_user_credentials=info.get('uses_user_credentials'),
                  duration_expected=expected,coverage_basis=coverage_basis)
     attrs.update(text_review_complete=bool(corrected),audio_review_status='not_verified',
-                 speaker_review_status='not_verified',render_version=6)
+                 speaker_review_status='not_verified',render_version=7)
     if corrected:attrs.update(manifest.get('quality_delivery',{}))
     yaml='---\n'+'\n'.join(k+': '+json.dumps(v,ensure_ascii=False) for k,v in attrs.items())+'\n---\n'
     warning='说话人编号为声纹估计，不代表真实姓名。短应答、抢话、笑声可能串人；“待核对”不能涵盖所有错误。'
@@ -373,7 +373,11 @@ def markdown(info, manifest, turns, corrected=False):
     if not manifest.get('coverage_complete'):warning='【部分音频试跑，非完整稿】'+warning
     if corrected and manifest.get('quality_delivery',{}).get('accepted_issue_turns'):
         warning+=' 本稿保留 '+str(manifest['quality_delivery']['accepted_issue_turns'])+' 段已说明原因的疑点，详见纠错记录中的 quality_acceptance。'
-    return yaml+'\n# '+info['title'].replace('\n',' ')+'\n\n'+warning+'\n\n## 正文\n\n'+content
+    summary_text=''
+    if corrected and summary is not None:
+        import summaries
+        summary_text=summaries.render(summary,turns)
+    return yaml+'\n# '+info['title'].replace('\n',' ')+'\n\n'+warning+'\n\n'+summary_text+'## 正文\n\n'+content
 
 
 def draft(job):
@@ -397,6 +401,10 @@ def _recover_export(job):
     acceptance=quality.require_accepted(job)
     if data.get('quality_fingerprint')!=acceptance['fingerprint']:
         raise ValueError('待恢复导出对应的质量验收已过期；保留现场，不能发布旧稿')
+    import summaries
+    summary=summaries.load(job)
+    if data.get('summary_fingerprint')!=(_digest(summary) if summary is not None else None):
+        raise ValueError('待恢复导出的总结已变化；保留现场，不能发布旧总结')
     for record in data['files']:
         _write_text(record['path'],record['text'])
     m=read_json(job/'manifest.json');m.update(data['manifest_update'])
@@ -404,7 +412,7 @@ def _recover_export(job):
     journal.unlink()
 
 
-def finalize(job, output):
+def finalize(job, output, require_summary=False):
     job=Path(job);recover_review(job);_recover_export(job)
     m=read_json(job/'manifest.json');info=read_json(job/'source.json');raw=read_json(job/'turns.raw.json')
     corrected=read_json(job/'turns.corrected.json');review=read_json(job/'review-state.json')
@@ -418,15 +426,17 @@ def finalize(job, output):
     import quality
     acceptance=quality.require_accepted(job)
     m['quality_delivery']=acceptance['delivery']
+    import summaries
+    summary=summaries.load(job,required=require_summary)
     out=Path(output).resolve();out.mkdir(parents=True,exist_ok=True)
     def stamp(t):
         ms=round(t*1000);return f'{ms//3600000:02d}:{ms//60000%60:02d}:{ms//1000%60:02d},{ms%1000:03d}'
-    texts={'path':markdown(info,m,corrected,True),'raw_path':markdown(info,m,raw),
-           'correction_log':json.dumps(privacy.audit({**review,'quality_acceptance':acceptance}),ensure_ascii=False,indent=2)+'\n',
+    texts={'path':markdown(info,m,corrected,True,summary),'raw_path':markdown(info,m,raw),
+           'correction_log':json.dumps(privacy.audit({**review,'quality_acceptance':acceptance,**({'summary':summary} if summary is not None else {})}),ensure_ascii=False,indent=2)+'\n',
            'subtitle':'\n\n'.join(f"{i}\n{stamp(t['start'])} --> {stamp(t['end'])}\n{t['speaker']}："+'\n'.join(line.strip() for line in t['text'].splitlines() if line.strip()) for i,t in enumerate(corrected,1))+'\n'}
     rendered_manifest={k:m[k] for k in ('created_at','audio_duration','coverage_complete','speaker_report','duration_expected','coverage_basis') if k in m}
     inputs={'manifest':rendered_manifest,'source':info,
-            'raw':raw,'corrected':corrected,'review':review,'quality_acceptance':acceptance}
+            'raw':raw,'corrected':corrected,'review':review,'quality_acceptance':acceptance,'summary':summary}
     fingerprint=hashlib.sha256(json.dumps(inputs,ensure_ascii=False,sort_keys=True).encode('utf-8')).hexdigest()
     records=m.get('export_artifacts',{})
     if m.get('export_fingerprint')==fingerprint and set(records)==set(texts):
@@ -450,7 +460,7 @@ def finalize(job, output):
             'review_sha256':file_hash(job/'review-state.json'),'final_turns_sha256':file_hash(job/'turns.corrected.json'),
             'export_fingerprint':fingerprint,'export_artifacts':records}
     # Persist all contents before publishing any file; retry rolls the same bundle forward.
-    _write_transaction(job/'export-transaction.json',{'policy_version':2,'quality_fingerprint':acceptance['fingerprint'],'files':[{'path':str(paths[key]),'text':text} for key,text in texts.items()],
+    _write_transaction(job/'export-transaction.json',{'policy_version':2,'quality_fingerprint':acceptance['fingerprint'],'summary_fingerprint':_digest(summary) if summary is not None else None,'files':[{'path':str(paths[key]),'text':text} for key,text in texts.items()],
                                               'manifest_update':update})
     _recover_export(job)
     return dict(status='complete',verified=True,verification_scope='artifact_integrity',**acceptance['delivery'],**{key:str(path) for key,path in paths.items()})

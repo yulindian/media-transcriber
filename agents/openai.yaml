@@ -1,6 +1,6 @@
 interface:
   display_name: "多平台音视频转录"
-  short_description: "从视频与播客链接本地转录，标注说话人、修复识别错误并保存 Markdown"
-  default_prompt: "使用 $media-transcriber 转录这些音视频链接，校对识别错误、标注说话人并保存 Markdown。"
+  short_description: "转录音视频、校对分段，生成内容总结或话题时间轴并保存 Markdown"
+  default_prompt: "使用 $media-transcriber 转录这些音视频链接，校对分段、标注多人对话，在正文前增加内容总结或话题时间轴总结，并保存 Markdown。"
 policy:
   allow_implicit_invocation: true

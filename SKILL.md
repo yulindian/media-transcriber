@@ -1,6 +1,8 @@
 ---
 name: media-transcriber
-description: 转录视频、播客或本地音视频，生成便于阅读的 Markdown 逐字稿，单人自然分段，多人标注说话人，正文无时间轴和核对标记。用户要求提取口播、全文转写、修正识别错字、补标点或标注多人对话时使用。支持小红书、小宇宙、抖音、视频号、B站、YouTube 和媒体直链。已明确要转录的对话中，后续仅发媒体链接也沿用。单纯研究工具、分析链接或剪视频时不触发。
+description: 转录视频、播客或本地音视频，生成含内容总结的 Markdown 逐字稿，单主题一段总结，播客等多主题内容按话题提供时间轴总结。正文单人自然分段、多人标注说话人，无时间轴和核对标记。用户要求提取口播、全文转写、修正识别错字、补标点或标注多人对话时使用。支持小红书、小宇宙、抖音、视频号、B站、YouTube 和媒体直链。已明确要转录的对话中，后续仅发媒体链接也沿用。单纯研究工具、分析链接或剪视频时不触发。
+metadata:
+  version: "0.2.0"
 ---
 
 # 音视频转录
@@ -36,7 +38,8 @@ $entry = '<skill-dir>\scripts\transcribe.py'
 3. 用文件工具写 UTF-8 校对 JSON，再运行 `apply-edits JOB --input FILE`。脚本整批预检，错误带段落 ID，失败不推进校对；只检查时加 `--check`。只把实际核查过的段落列入 `reviewed_ids`。每次修改记录段落 ID、完整的修改前后文本、理由与依据。仅保存成功后继续 `review --next`，直到没有未校对段落。[校对 JSON 格式](references/operations.md#校对与导出)
 4. 运行 `quality JOB`，生成绑定当前版本的检查快照，按计数分页查看疑点，用 `--offset` 续页。重点核查长段无标点、碎片及说话人跳变。对影响原意的可疑词句用 `recheck JOB --turn-id ID --context 3` 局部重识别，结合上下文比较候选；同模型候选不是独立验证，不能直接整段覆盖。需要听审时用 `clip JOB --turn-id ID --context 3` 提取音轨；无法听审时保留原词和疑点。
 5. 修正后重新运行 `quality`。核查全部疑点后，将当前 `snapshot_fingerprint` 和每个保留疑点段落的理由写入验收 JSON，执行 `accept-quality JOB --input FILE`。没有疑点也需提交空的 `accepted_issues`。不能把未查看的疑点批量标为已接受。[验收格式与回听](references/operations.md#质量检查与回听)
-6. 执行 `finalize JOB`，需要覆盖保存位置时传入 `--output`。确认返回 `complete` 或 `existing`、`verified: true` 及 `quality_status`，回读成稿并说明保留疑点。`verified` 的 `verification_scope` 为文件完整性，不是听审或准确率保证。文本校对、音频听审和说话人验证分别说明。
+6. 基于实际读过的校对全文撰写总结，写入私有 UTF-8 JSON 后执行 `apply-summary JOB --input FILE`。单一核心主题用 `overview`，只写一段总结；播客、访谈等有多段实质话题时用 `timeline`，每项概括一段有内容量的讨论。按话题变化划分，不固定每几分钟切一段，不逐句列标题；通常一段覆盖数分钟至十余分钟，开场和收尾可短一些。每段写清主要观点、事例或结论，不只复述标题。时间轴使用对应起止段落 ID，脚本从真实识别段落提取时间；不得凭简介编造全文、数字或时间。总结是概括，正文仍是逐字稿。[总结格式](references/operations.md#内容总结与时间轴)
+7. 执行 `finalize JOB --require-summary`，需要覆盖保存位置时传入 `--output`。确认返回 `complete` 或 `existing`、`verified: true` 及 `quality_status`，回读总结和成稿并说明保留疑点。总结只放在正文前：单主题一段总结，多主题按话题给时间轴，正文继续无时间轴。正文或来源变化后重新生成总结，不能复用过期版本。`verified` 的 `verification_scope` 为文件完整性，不是听审或准确率保证。文本校对、音频听审和说话人验证分别说明。
 
 后续命令沿用开始任务时的 `$py` 和 `$entry`。将 `$job` 设为 `run` 返回的 `job` 路径，将 `$editsFile` 设为本批校对 JSON 的路径。按上面的状态执行对应命令。
 
@@ -45,7 +48,8 @@ $entry = '<skill-dir>\scripts\transcribe.py'
 & $py -X utf8 $entry apply-edits $job --input $editsFile
 & $py -X utf8 $entry quality $job
 & $py -X utf8 $entry accept-quality $job --input '<验收JSON路径>'
-& $py -X utf8 $entry finalize $job
+& $py -X utf8 $entry apply-summary $job --input '<总结JSON路径>'
+& $py -X utf8 $entry finalize $job --require-summary
 ```
 
 ## 校对判断

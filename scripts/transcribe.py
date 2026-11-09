@@ -21,6 +21,7 @@ import quality
 import resources
 import inputs
 import failures
+import summaries
 
 ROOT=Path(__file__).resolve().parents[1]
 RESULT_STREAM=sys.stdout
@@ -259,7 +260,7 @@ def _run_unlocked(args,c):
                 m.update(previous_state)
             docs.write_json(manifest_file,m)
             return {'status':'audio_ready','job':str(job),'audio_path':str(wav),'receipt':str(job/'audio-receipt.json'),
-                    'audio_sha256':digest,'audio_seconds':actual,'partial':limit is not None,'next':'run same input or --job, then review → quality → accept-quality → finalize'}
+                    'audio_sha256':digest,'audio_seconds':actual,'partial':limit is not None,'next':'run same input or --job, then review → quality → accept-quality → apply-summary → finalize --require-summary'}
         m.update(audio_duration=actual,coverage_complete=False,status='transcribing',audio_sha256=digest)
         docs.write_json(manifest_file,m)
         count=None if args.speakers=='auto' else int(args.speakers)
@@ -307,7 +308,7 @@ def _run_unlocked(args,c):
         docs.write_json(manifest_file,m);docs.draft(job)
         state=docs.read_json(job/'review-state.json')
         already_reviewed=set(state['reviewed_ids'])=={t['id'] for t in turns}
-        return {'status':m['status'],'job':str(job),'raw_markdown':str(job/'原始识别稿.md'),'turn_count':len(turns),'audio_seconds':actual,'speaker_report':m['speaker_report'],'warnings':warnings,'review_already_complete':already_reviewed,'next':'quality → accept-quality → finalize' if already_reviewed else 'review --next → apply-edits → quality → accept-quality → finalize','output':m.get('output_dir') or c['output']}
+        return {'status':m['status'],'job':str(job),'raw_markdown':str(job/'原始识别稿.md'),'turn_count':len(turns),'audio_seconds':actual,'speaker_report':m['speaker_report'],'warnings':warnings,'review_already_complete':already_reviewed,'next':'quality → accept-quality → apply-summary → finalize --require-summary' if already_reviewed else 'review --next → apply-edits → quality → accept-quality → apply-summary → finalize --require-summary','output':m.get('output_dir') or c['output']}
     except Exception as exc:
         m.update(failed_stage=m.get('status'),status='failed',coverage_complete=False,error=sources.redact(exc),**failures.describe(exc));docs.write_json(manifest_file,m)
         if isinstance(exc,resources.ResourceLimit):raise resources.ResourceLimit(m['error']) from None
@@ -371,7 +372,7 @@ def finalize_job(args,c):
         directories.discard(Path(args.job).resolve())
         with ExitStack() as stack:
             for directory in sorted(directories,key=lambda p:str(p).casefold()):stack.enter_context(job_lock(directory))
-            return docs.finalize(args.job,output)
+            return docs.finalize(args.job,output,require_summary=True) if getattr(args,'require_summary',False) else docs.finalize(args.job,output)
 
 
 def main():
@@ -397,11 +398,14 @@ def main():
     v.add_argument('--verbose',action='store_true',help='Include detailed source and manifest metadata')
     e=sub.add_parser('apply-edits',help='Apply auditable edits and record reviewed turn IDs');e.add_argument('job');e.add_argument('--input',required=True)
     e.add_argument('--check',action='store_true',help='Validate all edits without saving or advancing review')
+    su=sub.add_parser('apply-summary',help='Save an agent-written overview or topic timeline bound to reviewed turns')
+    su.add_argument('job');su.add_argument('--input',required=True)
     q=sub.add_parser('quality',help='Read local quality candidates; does not change review state');q.add_argument('job');q.add_argument('--offset',type=int,default=0);q.add_argument('--count',type=int,default=30)
     q=sub.add_parser('accept-quality',help='Accept current quality snapshot with explicit retained-issue reasons');q.add_argument('job');q.add_argument('--input',required=True)
     q=sub.add_parser('clip',help='Extract a local WAV excerpt for one turn');q.add_argument('job');q.add_argument('--turn-id',required=True);q.add_argument('--context',type=float,default=3)
     q=sub.add_parser('recheck',help='Re-recognize a bounded excerpt into a separate cache without applying edits');q.add_argument('job');q.add_argument('--turn-id',required=True);q.add_argument('--context',type=float,default=3)
     f=sub.add_parser('finalize',help='Export complete reviewed Markdown, raw copy, correction log and SRT');f.add_argument('job');f.add_argument('--output')
+    f.add_argument('--require-summary',action='store_true',help='Require an up-to-date overview or topic timeline')
     args=p.parse_args()
     try:
         c=config()
@@ -418,6 +422,8 @@ def main():
             result=batch_jobs.execute(args,c,run,job_lock)
         elif args.command=='review':result=review(args)
         elif args.command=='apply-edits':result=edit(args)
+        elif args.command=='apply-summary':
+            with job_lock(args.job):result=summaries.save(args.job,docs.read_json(args.input))
         elif args.command=='quality':
             if args.offset<0 or not 1<=args.count<=100:raise ValueError('offset >= 0 and count between 1 and 100 required')
             with job_lock(args.job):
