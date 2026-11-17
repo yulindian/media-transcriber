@@ -1,5 +1,7 @@
 # 运行与恢复
 
+首次准备环境见[安装参考](installation.md)。本页的 PowerShell 示例只是参数写法；其他宿主可用其子进程工具传入同样的参数。脚本不依赖 Codex 或 agents/ 配置。
+
 ```powershell
 $py = '<runtime-dir>\.venv\Scripts\python.exe'
 $entry = '<skill-dir>\scripts\transcribe.py'
@@ -9,7 +11,7 @@ $entry = '<skill-dir>\scripts\transcribe.py'
 & $py -X utf8 $entry run 'D:\素材\访谈.mp4' --speakers 3 --speaker-evidence '用户明确3人'
 ```
 
-配置的runtime下有 `.venv/Scripts/python.exe` 和 `models/`。模型缺失才执行 `scripts/setup.ps1`：复用官方SenseVoice int8、pyannote segmentation 3.0、CAM++缓存。环境为Python3.12、sherpa-onnx2.0.1、numpy、requests、yt-dlp与FFmpeg，无需GPU。
+配置的 runtime 下有独立 Python 环境和 `models/`。模型缺失才按安装参考执行 `scripts/setup.py`；Windows 的 setup.ps1 是兼容入口。非 Windows 的解释器为 `.venv/bin/python`。环境使用 Python 3.12、requirements.txt、FFmpeg 与 ffprobe，无需 GPU。
 
 ## 音轨获取与交接
 

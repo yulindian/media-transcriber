@@ -1,6 +1,6 @@
 {
-  "runtime": "D:/media-transcriber/runtime",
-  "output": "D:/media-transcriber/output",
+  "runtime": "runtime",
+  "output": "outputs",
   "threads": 4,
   "asr_language": "auto",
   "segmentation_shift": 0.5,

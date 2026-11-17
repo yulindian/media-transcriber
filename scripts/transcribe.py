@@ -78,7 +78,11 @@ def run(args,c):
 
 def config():
     path=ROOT/'config.json'
-    return docs.read_json(path if path.exists() else ROOT/'config.example.json')
+    cfg=docs.read_json(path if path.exists() else ROOT/'config.example.json')
+    for key in ('runtime','output'):
+        value=Path(cfg[key]).expanduser()
+        cfg[key]=str((value if value.is_absolute() else ROOT/value).resolve())
+    return cfg
 
 
 def emit(data):
@@ -97,8 +101,10 @@ def doctor(c):
             if isinstance(value,dict):services.append(urlsplit(value.get('endpoint','')).hostname)
     curl=shutil.which('curl.exe') or shutil.which('curl')
     curl_required=isinstance(anonymous,dict) and anonymous.get('enabled') is True
-    ready=all(checks.values()) and shutil.which('ffmpeg') and (curl or not curl_required)
-    return {'status':'ready' if ready else 'needs_setup','python':sys.executable,'ffmpeg':shutil.which('ffmpeg'),'models':checks,'yt_dlp':yt_dlp.version.__version__,'output':c['output'],'resolvers':list(c.get('resolvers',{})),'anonymous_services':services,'curl':curl,'asr_language':c.get('asr_language','zh')}
+    ffmpeg=shutil.which('ffmpeg');ffprobe=shutil.which('ffprobe')
+    missing=[name for name,value in [('ffmpeg',ffmpeg),('ffprobe',ffprobe),('curl',curl or not curl_required)] if not value]
+    missing.extend('model:'+name for name,ok in checks.items() if not ok)
+    return {'status':'ready' if not missing else 'needs_setup','missing':missing,'python':sys.executable,'ffmpeg':ffmpeg,'ffprobe':ffprobe,'models':checks,'yt_dlp':yt_dlp.version.__version__,'output':c['output'],'resolvers':list(c.get('resolvers',{})),'anonymous_services':services,'curl':curl,'asr_language':c.get('asr_language','zh')}
 
 
 def _valid_cached_wav(wav, manifest):
