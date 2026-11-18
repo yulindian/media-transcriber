@@ -64,5 +64,11 @@ class PortableSetupTests(unittest.TestCase):
         self.assertEqual(cfg['output'],str(self.root/'new-output'))
         self.assertEqual(cfg['threads'],2)
 
+    def test_download_only_does_not_fetch_models(self):
+        self.args.download_only=True
+        result=setup.install(self.args,self.root,execute=False)
+        self.assertTrue(any('install' in command for command in result['commands']))
+        self.assertFalse(any('setup_models.py' in argument for command in result['commands'] for argument in command))
+
 
 if __name__=='__main__':unittest.main()

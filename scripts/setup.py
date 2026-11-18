@@ -19,8 +19,9 @@ def install(args,root=None,execute=True):
     runtime=Path(cfg['runtime']);python=runtime/'.venv'/('Scripts/python.exe' if os.name=='nt' else 'bin/python')
     commands=[]
     if not python.is_file():commands.append(['uv','venv','--python','3.12',str(runtime/'.venv')])
-    commands.extend([['uv','pip','install','--python',str(python),'-r',str(root/'requirements.txt')],
-                     [str(python),'-X','utf8',str(root/'scripts/setup_models.py'),'--runtime',str(runtime)]])
+    download_only=getattr(args,'download_only',False)
+    commands.append(['uv','pip','install','--python',str(python),'-r',str(root/'requirements.txt')])
+    if not download_only:commands.append([str(python),'-X','utf8',str(root/'scripts/setup_models.py'),'--runtime',str(runtime)])
     result={'status':'install_plan','config':cfg,'python':str(python),'commands':commands}
     if not execute:return result
     needed=['uv','ffmpeg','ffprobe']
@@ -35,7 +36,9 @@ def install(args,root=None,execute=True):
             json.dump(cfg,stream,ensure_ascii=False,indent=2);stream.write('\n')
         Path(name).replace(file)
     finally:Path(name).unlink(missing_ok=True)
-    diagnostic=subprocess.run([str(python),'-X','utf8',str(root/'scripts/transcribe.py'),'doctor'],cwd=root,check=True,timeout=120,capture_output=True,text=True,encoding='utf-8')
+    check=[str(python),'-X','utf8',str(root/'scripts/transcribe.py'),'doctor']
+    if download_only:check.append('--download-only')
+    diagnostic=subprocess.run(check,cwd=root,check=True,timeout=120,capture_output=True,text=True,encoding='utf-8')
     if diagnostic.stderr:print(diagnostic.stderr,file=sys.stderr)
     health=json.loads(diagnostic.stdout)
     if health.get('status')!='ready':raise ValueError('Environment not ready: '+', '.join(health.get('missing',[]))+'. Run doctor for details.')
@@ -46,6 +49,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--runtime');parser.add_argument('--output')
     parser.add_argument('--plan',action='store_true',help='Show paths and commands without writing files or installing')
+    parser.add_argument('--download-only',action='store_true',help='Prepare video download without fetching speech models')
     args=parser.parse_args()
     try:result=install(args,execute=not args.plan)
     except (OSError,ValueError,subprocess.SubprocessError) as exc:

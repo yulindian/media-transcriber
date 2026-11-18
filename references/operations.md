@@ -13,6 +13,14 @@ $entry = '<skill-dir>\scripts\transcribe.py'
 
 配置的 runtime 下有独立 Python 环境和 `models/`。模型缺失才按安装参考执行 `scripts/setup.py`；Windows 的 setup.ps1 是兼容入口。非 Windows 的解释器为 `.venv/bin/python`。环境使用 Python 3.12、requirements.txt、FFmpeg 与 ffprobe，无需 GPU。
 
+## 模式与交付
+
+- **只下载视频**：`<python> -X utf8 <entry> download <INPUT> --output <目录>`。检查 `status: video_ready`，交付 `video_path`，到此结束。没有视频画面时报告无法取得视频，不交付音轨冒充视频。
+- **只转录**：直接执行 `run INPUT`，完成校对、验收、总结及导出。为识别而取得的媒体留在任务缓存中，不额外作为成品交付。
+- **下载并转录**：先下载，再执行 `<python> -X utf8 <entry> run <video_path> --source-url <原分享URL> --title <下载结果中的标题> --output <目录>`。只在原输入是 HTTP(S) 链接时传 `--source-url`，标题为空时可省略 `--title`。用参数数组保留路径、标题和链接中的特殊字符。完成校对和导出后交付两者。视频已保存而转录失败时，交付现成视频并说明转录状态；恢复时直接用同一文件和任务，不重下。
+
+下载只检查实际视频流及支持的封装，不代表已逐帧验证。保留原视频的编码和封装，不承诺所有输出都是 MP4。优先选择含画面和声音的格式，必要时由下载器合并流。平台确实只提供静音视频时可以下载，但没有声音就不能转录。下载使用私有暂存目录，验证通过后另存；不同内容的同名文件保留，按序号另存。下载与转录的参数 `--cookies` 沿用相同的明确授权规则；组合模式对已保存的本地文件转录时无需再次传 Cookie。
+
 ## 音轨获取与交接
 
 ```powershell

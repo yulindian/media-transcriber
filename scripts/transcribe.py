@@ -89,9 +89,14 @@ def emit(data):
     print(json.dumps(data,ensure_ascii=False,indent=2),flush=True,file=RESULT_STREAM)
 
 
-def doctor(c):
+def download_video(args,c):
+    import video_download
+    return video_download.download(args.input,args.cookies,c,args.output or c['output'],job_lock)
+
+
+def doctor(c,download_only=False):
     models=Path(c['runtime'])/'models'
-    checks={name:(models/name).is_file() and (models/name).stat().st_size>0 for name in [engine.SENSE+'/model.int8.onnx',engine.SENSE+'/tokens.txt',engine.SEG,engine.EMBED]}
+    checks={} if download_only else {name:(models/name).is_file() and (models/name).stat().st_size>0 for name in [engine.SENSE+'/model.int8.onnx',engine.SENSE+'/tokens.txt',engine.SEG,engine.EMBED]}
     import yt_dlp.version
     anonymous=c.get('anonymous_api') or {}
     from urllib.parse import urlsplit
@@ -383,7 +388,11 @@ def finalize_job(args,c):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);sub=p.add_subparsers(dest='command',required=True)
-    sub.add_parser('doctor',help='Check runtime, models and configuration')
+    health=sub.add_parser('doctor',help='Check runtime, models and configuration')
+    health.add_argument('--download-only',action='store_true',help='Check video download without requiring speech models')
+    download=sub.add_parser('download',help='Save video without transcription')
+    download.add_argument('input',help='Single video link, share text or local video path')
+    download.add_argument('--output');download.add_argument('--cookies')
     pr=sub.add_parser('probe',help='Inspect one URL without downloading media');pr.add_argument('url');pr.add_argument('--cookies')
     for command in ('run','prepare'):
         r=sub.add_parser(command,help='Acquire and verify audio'+(' without loading models' if command=='prepare' else ', then transcribe'))
@@ -415,7 +424,8 @@ def main():
     args=p.parse_args()
     try:
         c=config()
-        if args.command=='doctor':result=doctor(c)
+        if args.command=='doctor':result=doctor(c,args.download_only)
+        elif args.command=='download':result=download_video(args,c)
         elif args.command=='probe':
             result=sources.metadata(inputs.normalize(args.url),args.cookies,c)
             result.pop('media_url',None)

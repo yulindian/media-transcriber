@@ -37,6 +37,8 @@ python -X utf8 scripts/setup.py
 
 必须确认返回 `status: ready`。`missing` 会列出缺少的命令或模型，不能只根据退出码判断准备完成。模型已缓存时复用，不重复下载。
 
+只下载视频时，初次准备使用 `setup.py --download-only`，环境检查使用 `doctor --download-only`。这两步跳过语音模型；之后要转录时，再按常规方式准备缺少的模型。
+
 ## 运行约定
 
 读取 config.json，或缺省的 config.example.json，取得 runtime 和 output。把 `<python>`、`<entry>`、`<job>` 替换为绝对路径，以子进程参数数组调用，避免把分享文案拼成 shell 代码。

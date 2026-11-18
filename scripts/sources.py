@@ -72,13 +72,19 @@ class QuietLogger:
     def error(self, message): pass
 
 
-def metadata(url, cookies=None, config=None):
+_VIDEO_FORMAT = 'bestvideo+bestaudio/best[vcodec!=none][acodec!=none]/best[vcodec!=none]'
+
+
+def metadata(url, cookies=None, config=None, *, video=False):
     """Try bounded anonymous routes, preserving explicitly configured resolvers."""
     import anonymous_sources as anonymous
     config = config or {}
     provider = platform(url)
+    def native():
+        if video:return _metadata_native(url,cookies,config,video=True)
+        return _metadata_native(url,cookies,config)
     if Path(url).is_file() or config.get('resolvers', {}).get(urlsplit(url).hostname):
-        return _metadata_native(url, cookies, config)
+        return native()
     attempts = []
     if provider == '视频号' and not cookies and anonymous.api_enabled(provider, config):
         result = anonymous.api_metadata(url, provider, config)
@@ -96,7 +102,7 @@ def metadata(url, cookies=None, config=None):
             pass
     attempts.append({'route':'native','status':'failed'})
     try:
-        result = _metadata_native(url, cookies, config)
+        result = native()
         attempts[-1]['status']='success';result['acquisition_attempts'] = attempts
         result['uses_user_credentials'] = bool(cookies)
         return result
@@ -115,7 +121,7 @@ def metadata(url, cookies=None, config=None):
             raise ValueError(f'{provider}公开入口不可用：{redact(native_error)}；{redact(api_error)}。未取得音轨，不要求用户登录，可提供媒体文件继续。') from None
 
 
-def _metadata_native(url, cookies=None, config=None):
+def _metadata_native(url, cookies=None, config=None, *, video=False):
     """No media download. Return a serializable source descriptor."""
     config = config or {}
     if Path(url).is_file():
@@ -166,6 +172,7 @@ def _metadata_native(url, cookies=None, config=None):
     check_public_url(url)
     from yt_dlp import YoutubeDL
     opts={'quiet':True,'no_warnings':True,'noplaylist':True,'socket_timeout':15,'retries':0,'extractor_retries':0,'logger':QuietLogger(),'format':'bestaudio/best','usenetrc':False}
+    if video:opts['format']=_VIDEO_FORMAT
     if provider=='抖音':opts['http_headers']={'Referer':'https://www.douyin.com/','User-Agent':UA}
     if shutil.which('node'):opts['js_runtimes']={'node':{'path':shutil.which('node')}}
     if cookies: opts['cookiefile']=str(cookies)
@@ -179,7 +186,7 @@ def _metadata_native(url, cookies=None, config=None):
     if not info.get('url') and not any(f.get('url') for f in info.get('formats', []) if isinstance(f, dict)):
         raise ValueError(f'{provider}未提供可播放音视频，可能需要有效授权；本次未取得音轨。')
     descriptor={'id':str(info.get('id') or hashlib.sha256(url.encode()).hexdigest()[:16]),'platform':provider,'source_url':original,'resolved_url':url,'title':info.get('title') or '音视频转录','description':info.get('description',''),'author':info.get('uploader',''),'duration':info.get('duration'),'published_at':info.get('upload_date',''),'acquisition':'yt-dlp'}
-    if not cookies and info.get('protocol') in ('http','https') and isinstance(info.get('url'),str):
+    if not video and not cookies and info.get('protocol') in ('http','https') and isinstance(info.get('url'),str):
         # Reuse the selected HTTP audio URL instead of extracting the page twice.
         # HLS/DASH manifests still use yt-dlp's downloader.
         descriptor['media_url']=http_url(info['url'])
@@ -230,7 +237,7 @@ def _curl_download(url, target, public_only=True):
     return size, file_hash(target)
 
 
-def acquire(info, job, cookies=None):
+def acquire(info, job, cookies=None, *, video=False):
     job=Path(job)
     budget=resources.policy();end=resources.deadline(budget['download_seconds'])
     resources.disk(job)
@@ -311,6 +318,10 @@ def acquire(info, job, cookies=None):
                 raise resources.ResourceLimit('媒体超过 max_download_bytes')
         except resources.ResourceLimit as exc:blocked[0]=exc;raise
     opts={'quiet':True,'no_warnings':True,'noplaylist':True,'socket_timeout':min(25,resources.remaining(end)),'retries':1,'logger':QuietLogger(),'format':'bestaudio/best','outtmpl':str(job/'source.%(ext)s'),'max_filesize':int(budget['max_download_bytes']),'progress_hooks':[progress]}
+    if video:
+        opts.update(format=_VIDEO_FORMAT,usenetrc=False)
+        node=shutil.which('node')
+        if node:opts['js_runtimes']={'node':{'path':node}}
     if info.get('platform')=='抖音':opts['http_headers']={'Referer':'https://www.douyin.com/','User-Agent':UA}
     if cookies: opts['cookiefile']=str(cookies)
     try:
@@ -320,7 +331,14 @@ def acquire(info, job, cookies=None):
                 raise ValueError('下载器未取得单条音视频')
             progress({'total_bytes':result.get('filesize') or result.get('filesize_approx') or 0})
             paths=[Path(x['filepath']) for x in result.get('requested_downloads',[]) if x.get('filepath')]
-            paths.append(Path(ydl.prepare_filename(result)))
+            if video:
+                # Prefer the post-processed video, never an intermediate stream.
+                downloads=result.get('requested_downloads') or []
+                paths=[Path(item['filepath']) for item in downloads
+                       if item.get('filepath') and (item.get('requested_formats') or len(downloads)==1)]
+                paths=[Path(result['filepath'])] + paths if result.get('filepath') else paths
+                paths.append(Path(ydl.prepare_filename(result)))
+            else:paths.append(Path(ydl.prepare_filename(result)))
     except resources.ResourceLimit:raise
     except Exception as exc:
         if blocked[0] is not None:raise blocked[0]
